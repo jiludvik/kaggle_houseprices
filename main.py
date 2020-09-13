@@ -16,7 +16,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 #Preprocessing
-from scipy.stats import shapiro
+from scipy.stats import shapiro, normaltest,anderson
+from pingouin import multivariate_normality
 from sklearn.impute import SimpleImputer
 from sklearn.feature_selection import SelectKBest, f_regression, RFECV, RFE
 from sklearn.pipeline import Pipeline
@@ -104,8 +105,64 @@ target_dtype=str
 for dataset in all_datasets:
     dataset[target_colnames]=dataset[target_colnames].astype(target_dtype)
 
+#%% Analyse missing values - OPTIONAL
 
-#%% Correlation Matrix for Numerical Columns Only - OPTIONAL
+# Define function to create a data frame with column data types, and missing value stats
+def descriptive_df(df):
+    #df=test
+    ddf = pd.DataFrame({'column_name': df.columns,
+                                 'data_type' : df.dtypes.astype(str),
+                                 'count_missing': df.isnull().sum(),
+                                 'percent_missing': df.isnull().sum() * 100 / len(df)})
+    ddf.sort_values('percent_missing', inplace=True, ascending=False)
+    return(ddf)
+
+# Create dataframes with descriptive stats
+train_desc_df=descriptive_df(train)
+train_desc_df.name ='Training data'
+test_desc_df=descriptive_df(test)
+test_desc_df.name ='Test data'
+combined_desc_df=descriptive_df(combined)
+combined_desc_df.name ='Training + test data'
+
+# Look at columns with missing values in test & train data set
+print('Analysis of missing values')
+for df in [train_desc_df, test_desc_df]:
+    print(df.name)
+    print('----------')
+    print(df.query('count_missing > 0'))
+    print()
+
+#%% Fill in / impute missing values - MANDATORY
+
+impstrategy_popular=['FireplaceQu', 'Electrical', 'Utilities','Functional','KitchenQual','Exterior2nd','Exterior1st','SaleType']
+impstrategy_mean=['GarageCars','GarageArea',
+                  'BsmtHalfBath','BsmtFullBath', 'BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','TotalBsmtSF']
+impstrategy_none=['PoolQC', 'MiscFeature', 'Alley', 'Fence', 'MasVnrType',
+                  'GarageQual','GarageCond','GarageType','GarageFinish',
+                  'BsmtCond','BsmtQual','BsmtExposure','BsmtFinType1','BsmtFinType2']
+impstrategy_0=['MasVnrArea','GarageYrBlt']
+
+for dataset in all_datasets:
+    #dataset=train
+    dataset[impstrategy_none] = dataset[impstrategy_none].fillna('None')
+    dataset[impstrategy_0] = dataset[impstrategy_0].fillna(0)
+    for i in impstrategy_popular:# could be probably rewritten with .apply()
+        if i in dataset.columns:
+            dataset[i]=SimpleImputer(strategy='most_frequent').fit_transform(dataset[[i]])
+    for i in impstrategy_mean:
+        if i in dataset.columns:
+            dataset[i]=SimpleImputer(strategy='mean').fit_transform(dataset[[i]])
+    dataset['MSZoning'] = train.groupby('MSSubClass')['MSZoning'].transform(lambda x: x.fillna(x.mode()[0]))
+    dataset['LotFrontage'] = train.groupby(['Neighborhood','BldgType','GarageCars'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
+    dataset['LotFrontage'] = train.groupby(['Neighborhood'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
+
+train.to_csv('train2.csv')
+train.isnull().sum()
+test.isnull().sum()
+
+#%% Identify top features 1- MANDATORY
+# Correlation Matrix for Numerical Columns Only - OPTIONAL
 def heatmap(data, title=None, annot=True, annot_fontsize=12):
     _, ax = plt.subplots(figsize=(14, 12))
     colormap = sns.diverging_palette(220, 10, as_cmap=True)
@@ -145,182 +202,29 @@ plt.show()
 
 # Floor Space is mutually correlated, Garage variables are mutually correlated
 
-#%% Analyse missing values - OPTIONAL
-
-# Define function to create a data frame with column data types, and missing value stats
-def descriptive_df(df):
-    #df=test
-    ddf = pd.DataFrame({'column_name': df.columns,
-                                 'data_type' : df.dtypes.astype(str),
-                                 'count_missing': df.isnull().sum(),
-                                 'percent_missing': df.isnull().sum() * 100 / len(df)})
-    ddf.sort_values('percent_missing', inplace=True, ascending=False)
-    return(ddf)
-
-# Create dataframes with descriptive stats
-train_desc_df=descriptive_df(train)
-train_desc_df.name ='Training data'
-test_desc_df=descriptive_df(test)
-test_desc_df.name ='Test data'
-combined_desc_df=descriptive_df(combined)
-combined_desc_df.name ='Training + test data'
-
-# Look at columns with missing values in test & train data set
-print('Analysis of missing values')
-for df in [train_desc_df, test_desc_df]:
-    print(df.name)
-    print('----------')
-    print(df.query('count_missing > 0'))
-    print()
-
-#%% Define Imputation Strategy - IGNORE
-# THIS IS NOT A GOOD IDEA FOR A DATAFRAME WITH THE SHAPE of 1500x80. MAYBE FOR 10xLARGER DATASET
-
-# Function to evaluate an (independent) feature and recommend imputation strategy
-def imputation_strat_ind(feature=None, dataset=train):
-    if dataset[feature].isnull().sum()==0:
-        action='Do Nothing'
-    elif feature in ['Alley','Fence','MiscFeature']:
-        action='Replace With None'
-    elif feature=='LotFrontage':
-        action='Depends on LotConfig'
-    elif feature=='MasVnrArea':
-        action='Replace With 0'
-    else:
-        action='Impute'
-    return(action)
-
-# Function to evaluate a pair of dependent features and recommend imputation strategy
-def imputation_strat_dep(ind_feature=None, dep_feature=None, baseline=0, dataset=train, verbose=False):
-   case2_count=dataset[dataset[ind_feature]!=baseline][dep_feature].isnull().sum()
-   case1_count=dataset[dataset[ind_feature]==baseline][dep_feature].isnull().sum()
-   if case1_count!=0:
-       action='Replace with None'
-   elif case2_count!=0:
-       action='Impute'
-   else:
-       action='Do Nothing'
-   if verbose:
-       print('Variable', dep_feature)
-       print ('Count ({0}==0 & {1} == Null) = {2}'.format(ind_feature, dep_feature,case1_count))
-       print('Count ({0}!=0 & {1} == Null) = {2}'.format(ind_feature, dep_feature, case2_count))
-       print ('Cleansing Approach:',action)
-   return(action)
-
-# Identify cleansing value for variables whose Null value may be dependent on value of other variable
-def desc_df_imputation(dataset, desc_df):
-    desc_df['imp_strategy'] = np.nan
-    for key in dep_features:
-        for value in dep_features[key]:
-            if value in dataset.columns:
-                desc_df.loc[desc_df.column_name == value, 'imp_strategy'] = \
-                    imputation_strat_dep(ind_feature=key, dep_feature=value, dataset=dataset)
-    for value in ind_features:
-        if value in dataset.columns:
-            action=imputation_strat_ind(feature=value, dataset=dataset)
-            desc_df.loc[desc_df.column_name == value, 'imp_strategy'] = action
-    print()
-
-ind_features = ['MiscFeature', 'Alley', 'Fence', 'FireplaceQu', 'LotFrontage',
-       'MasVnrArea', 'MSZoning', 'Functional', 'BsmtHalfBath',
-       'BsmtFullBath', 'Utilities', 'KitchenQual', 'BsmtFinSF1',
-       'SaleType', 'BsmtFinSF2', 'BsmtUnfSF', 'TotalBsmtSF', 'Exterior2nd',
-       'Exterior1st', 'GarageArea', 'Electrical', 'KitchenAbvGr',
-       'TotRmsAbvGrd', 'Fireplaces', 'Id', 'HalfBath', 'PavedDrive',
-       'WoodDeckSF', 'OpenPorchSF', 'EnclosedPorch', '3SsnPorch',
-       'ScreenPorch', 'PoolArea', 'MiscVal', 'MoSold', 'YrSold',
-       'BedroomAbvGr', 'HeatingQC', 'FullBath', 'OverallCond', 'LotArea',
-       'Street', 'LotShape', 'LandContour', 'LotConfig', 'LandSlope',
-       'Neighborhood', 'Condition1', 'Condition2', 'BldgType', 'HouseStyle',
-       'OverallQual', 'YearBuilt', 'GrLivArea', 'YearRemodAdd', 'RoofStyle',
-       'RoofMatl', 'ExterQual', 'ExterCond', 'Foundation', 'Heating',
-       'MSSubClass', 'CentralAir', '1stFlrSF', '2ndFlrSF', 'LowQualFinSF',
-       'SaleCondition','SalePrice']
-
-# Define pairs of independent and dependent features to check
-dep_features ={
-    'PoolArea':['PoolQC'],
-    'Fireplaces': ['FireplaceQu'],
-    'GarageArea': ['GarageType','GarageYrBlt','GarageFinish','GarageQual','GarageCond','GarageCars'],
-    'TotalBsmtSF': ['BsmtFinSF1','BsmtFinSF2','BsmtExposure','BsmtCond','BsmtQual','BsmtUnfSF', 'BsmtFullBath', 'BsmtHalfBath'],
-    'BsmtFinSF1': ['BsmtFinType1'],
-    'BsmtFinSF2': ['BsmtFinType2'],
-    'MasVnrArea': ['MasVnrType'],
-    'LotArea': ['LotFrontage'],
-    'KitchenAbvGr': ['KitchenQual']
-}
-
-desc_df_imputation(train, train_desc_df)
-desc_df_imputation(test, test_desc_df)
-
-#Generate indices of columns to action
-for df in [train_desc_df,test_desc_df]:
-    print(df.name)
-    print('----------')
-    print('Impute:',df.query('imp_strategy=="Impute"').index)
-    print('Replace with "None":', df.query('imp_strategy=="Replace With None"').index)
-    print('Replace with 0:', df.query('imp_strategy=="Replace With 0"').index)
-    print('Depends on LotConfig:', df.query('imp_strategy=="Depends on LotConfig"').index)
-    print()
-
-
-#%% Fill in / impute missing values - MANDATORY
-
-impstrategy_popular=['FireplaceQu', 'Electrical', 'Utilities','Functional','KitchenQual','Exterior2nd','Exterior1st','SaleType']
-impstrategy_mean=['GarageCars','GarageArea',
-                  'BsmtHalfBath','BsmtFullBath', 'BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','TotalBsmtSF']
-impstrategy_none=['PoolQC', 'MiscFeature', 'Alley', 'Fence', 'MasVnrType',
-                  'GarageQual','GarageCond','GarageType','GarageFinish',
-                  'BsmtCond','BsmtQual','BsmtExposure','BsmtFinType1','BsmtFinType2']
-impstrategy_0=['MasVnrArea','GarageYrBlt']
-
-for dataset in all_datasets:
-    #dataset=train
-    dataset[impstrategy_none] = dataset[impstrategy_none].fillna('None')
-    dataset[impstrategy_0] = dataset[impstrategy_0].fillna(0)
-    for i in impstrategy_popular:# could be probably rewritten with .apply()
-        if i in dataset.columns:
-            dataset[i]=SimpleImputer(strategy='most_frequent').fit_transform(dataset[[i]])
-    for i in impstrategy_mean:
-        if i in dataset.columns:
-            dataset[i]=SimpleImputer(strategy='mean').fit_transform(dataset[[i]])
-    dataset['MSZoning'] = train.groupby('MSSubClass')['MSZoning'].transform(lambda x: x.fillna(x.mode()[0]))
-    dataset['LotFrontage'] = train.groupby(['Neighborhood','BldgType','GarageCars'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
-    dataset['LotFrontage'] = train.groupby(['Neighborhood'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
-
-train.to_csv('train2.csv')
-train.isnull().sum()
-test.isnull().sum()
-
-#%% Exploratory Data Analysis
-# https://www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda
-
-# Important variables
-# - Saleprice - response: histogram
-# - Top 10-20 Predictors: correlation matrix / RFE
-# - Multi-colinearity
-# - Strength of correlations: using whisker plots / scatter plots
-# - Identification of  outliers: scatter plots
-
-#%% Identify top features - MANDATORY
+#%% Identify top features 2- MANDATORY
 #Generate dummy variables
-train_encoded_x= pd.get_dummies(train.drop('SalePrice', axis=1), drop_first=True)
+train_encoded_x= pd.get_dummies(train.drop(['SalePrice','Id'], axis=1), drop_first=True)
 train_encoded_y=train['SalePrice']
-train_encoded=pd.concat([y, X.reindex(y.index)], axis=1)
+train_encoded=pd.concat([train_encoded_y, train_encoded_x.reindex(train_encoded_y.index)], axis=1)
 
-# Top 20 deatures By RFE
+# Top features By RFE
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
-selector_rfe = RFE(estimator=DecisionTreeRegressor(), n_features_to_select=20)
+top_features_no=10
+selector_rfe = RFE(estimator=DecisionTreeRegressor(), n_features_to_select=top_features_no)
 selector_rfe.fit(train_encoded_x,train_encoded_y)
 best_features_rfe=train_encoded_x.columns[selector_rfe.support_]
-print ('Top 20 Predictors by RFE with DecisionTreeRegressor')
+print ('Top', top_features_no,'Predictors by RFE with DecisionTreeRegressor')
 print(best_features_rfe)
+
+# SalePrice + Best Predictors (LotFrontage', 'OverallQual', 'YearBuilt', 'BsmtFinSF1',
+# 'TotalBsmtSF','1stFlrSF', '2ndFlrSF', 'GrLivArea', 'GarageCars', 'GarageArea)
 
 # Optimum feature selection using RFECV
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
 time_start = perf_counter()
 scoring_method='neg_mean_squared_error'
-cv_method = RepeatedStratifiedKFold(n_splits=10, n_repeats=5, random_state=0)
+cv_method = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=0)
 model = DecisionTreeRegressor()
 selector_rfecv = RFECV(estimator=model, scoring=scoring_method, n_jobs=-1, cv=cv_method)
 selector_rfecv.fit(train_encoded_x,train_encoded_y)
@@ -330,6 +234,7 @@ print('Best Features By RFECV with DecisionTreeClassifier')
 print (len(best_features_rfecv),'out of', len(train_encoded_x.columns),'columns')
 print (best_features_rfecv)
 print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
+
 #%% Exploratory Data Analysis
 
 #Topics / Functions for EDA
@@ -342,67 +247,119 @@ print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
 #       Scatter plot / bar plot for all variables in the group
 #   Are there any categorical values with low number of observations?
 #       Groupby + clustering
+#   Outliers: method tbc
+
+#Best predictors
+#    'BsmtFinSF1', 'TotalBsmtSF', '1stFlrSF', '2ndFlrSF', 'GrLivArea',
+
+# OverallQual
+# YearBuilt
+# Neighborhood
+# LotFrontage, LotArea
+# 'GarageCars', 'GarageArea
+
+# LotArea?
 
 #https://towardsdatascience.com/a-starter-pack-to-exploratory-data-analysis-with-python-pandas-seaborn-and-scikit-learn-a77889485baf
 
-# Response: Saleprice
-# Histogram / density plot - SalePrice
-# SalePrice v key correlated varibles:
-    # Location: Neighboroughood, MS SubZoning
-    # Square Footage: TotalBsmtSF', '1stFlrSF', 2ndFlrSF' 'GrLivArea'
-    # Garage: GarageCars
-    # Quality: ExterQUal_TA
-    # Year: YearBuilt', 'YearRemodAdd, Year Sold?
-    # Lot: LotFrontage', 'LotArea
+def mydistplot(x, data=None, x_label=None, y_label=None, title=None, show=True):
+    plot = sns.distplot(data[x]);
+    plot.set(ylabel=y_label)
+    plot.set(xlabel=x_label)
+    plot.set(title=title)
+    sns.despine(trim=True, left=True)
+    if show:
+        plt.show()
+    else:
+        return(plot)
+
+def myboxplot(x=None, y=None, data=None, title=None, h_line=None, show=True):
+    plot = sns.boxplot(x=data[x], y=data[y])
+    if h_line !=None:
+        plot.axhline(h_line)
+    plot.set(title=title)
+    if show:
+        plt.show()
+    else:
+        return(plot)
+
+def mylmplot(x=None, y=None, data=None, title=None, show=True):
+    plot3 = sns.lmplot(x=x, y=y,
+                       lowess=True,
+                       scatter_kws={'alpha': 0.05},
+                       line_kws={'color': 'darkblue'},
+                       data=data)
+    plot3.set(title=title)
+    if show:
+        plt.show()
+    else:
+        return(plot)
 
 #1. SALEPRICE
-#Plot histogram
-plot1=sns.distplot(train['SalePrice'], color="b");
-plot1.set(ylabel="Frequency")
-plot1.set(xlabel="SalePrice")
-plot1.set(title="SalePrice Distribution")
-sns.despine(trim=True, left=True)
-plt.show()
+mydistplot('SalePrice', train, y_label="Frequency", title="SalePrice Distribution", show=True)
 
-# Normality tests
-stat, p = shapiro(y)
-skew=train['SalePrice'].skew()
-kurt=train['SalePrice'].kurt()
-
-print('Shapiro-Wilk: stat=%.3f, p=%.3f (p>0.05 = gaussian)' % (stat, p))
-print("Skewness: %f (0 = symmetrical)" % skew )
-print("Kurtosis: %f (3 = normaldist)" % kurt)
-
-#NEIGBOURGHOOD / MSSUBZONING
-#plot2=sns.barplot(x='Neighborhood', y='SalePrice', data=train)
-#plot2.set_xticklabels(plot2.get_xticklabels(), rotation=45)
-#plot2.axhline(train['SalePrice'].mean())
-#plot2.set(title="SalePrice Per Neighborhood")
-# plt.show()
-
-# Scatter plot with fill based on BldgType
+# Scatter plot with fill color driven by a variable
 #plot3=sns.scatterplot(x=train['Neighborhood'], y=train['SalePrice'], hue=train['BldgType'].tolist())
 #plt.show()
 
-plot3=sns.stripplot(x=train['Neighborhood'], y=train['SalePrice'], alpha=.25 )
-plot3.set_xticklabels(plot3.get_xticklabels(), rotation=45)
-plot3.axhline(train['SalePrice'].mean())
-plot3.set(title="SalePrice Per Neighborhood")
+#SALEPRICE BY NEIGBOURGHOOD
+plot=sns.stripplot(x=train['Neighborhood'], y=train['SalePrice'], hue=train['OverallQual'].tolist(), alpha=.25 )
+plot.set_xticklabels(plot.get_xticklabels(), rotation=45)
+plot.axhline(train['SalePrice'].mean())
+plot.set(title="SalePrice Per Neighborhood & Overall Quality")
 plt.show()
 
-train.dtypes
+#SALEPRICE BY OVERALLQUAL
+myboxplot (x='OverallQual',y='SalePrice', data=train, title='SalePrice by OverallQual', h_line=train['SalePrice'].mean())
 
-#%% Crosstab report - PROB NOT NEEDED
-# Discrete Variable Correlation by Survival using
-# group by aka pivot table: https://pandas.pydata.org/pandas-docs/stable/generated/pandas.DataFrame.groupby.html
-train_label_y='SalePrice'
-train_labels_x=train.drop(train_label_y, axis=1).columns
+#SALEPRICE BY YEARBUILT
+mylmplot(x='YearBuilt', y='SalePrice', data=train, title="SalePrice By YearBuilt")
 
-for x in train_labels_x:
-    if train[x].dtype not in ['float64','int64']:
-        print('SalePrice Correlation by:', x)
-#       print(train[[x, Target[0]]].groupby(x, as_index=False).mean())
-        print(train[[x, train_label_y]].groupby(x, as_index=False).mean())
-        print('-' * 10, '\n')
+#SALEPRICE BY LOTFRONTAGE/LOTAREA
+mylmplot(x='SalePrice', y='LotFrontage', data=train, title="LotFrontage by SalePrice")
+mylmplot(x='SalePrice', y='LotArea', data=train, title="LotArea by SalePrice")
 
+# SalePrice by Square Footage
+mylmplot(y='SalePrice', x='GrLivArea', data=train, title="SalePrice by GrLivArea")
+mylmplot(y='SalePrice', x='TotalBsmtSF', data=train, title="SalePrice by TotalBsmtSF")
+mylmplot(y='SalePrice', x='BsmtFinSF1', data=train, title="SalePrice by BsmtFinSF1")
+mylmplot(y='SalePrice', x='1stFlrSF', data=train, title="SalePrice by 1stFlrSF")
+mylmplot(y='SalePrice', x='2ndFlrSF', data=train, title="SalePrice by 2ndFlrSF")
+
+# Feature engineering ideas
+# - Combine SF and have flags for having / not having basement or 2nd Floor or Garage
+# - Replace neighborougood with average square foot sale price / lotarea sale price??
+
+#SALEPRICE BY GarageCars & GarageArea
+myboxplot (x='GarageCars',y='SalePrice', data=train, title='SalePrice by GarageCars', h_line=train['SalePrice'].mean())
+mylmplot(x='GarageArea', y='SalePrice', data=train, title="SalePrice by GarageArea")
+# SalePrice goes down after 4th car - most people have max 4 cars?
+# or no-one is recording car space beyond 5 cars
+
+# Question: Zero values in 2nd FlrSF, BsmtFinSF1, GarageArea are skewing distribution
+
+
+#%% Normality test of all variables
+def univar_normtest(data=None):
+    norm_test_cols=['name','normal', 'shapiro_gauss','dagostino_gauss','anderson_gauss','shapiro_stat','shapiro_p','dagostino_stat','dagostino_p','andreson_crit_val','andreson_stat']
+    norm_test=pd.DataFrame(columns=norm_test_cols)
+    for col in data.select_dtypes(exclude='object').columns:
+        shapiro_stat, shapiro_p = shapiro(data[col])
+        shapiro_result=(shapiro_p>0.05)
+        dagost_stat, dagost_p = normaltest(data[col])
+        dagost_result = (dagost_p>0.05)
+        anders = anderson(data[col])
+        anders_result=(anders.statistic < anders.critical_values[2])
+        result=shapiro_result or dagost_result or anders_result
+        result=pd.DataFrame([[col,result, shapiro_result, dagost_result,anders_result, shapiro_stat, shapiro_p, dagost_stat, dagost_p,anders.critical_values[2], anders.statistic]], columns=norm_test_cols)
+        norm_test = norm_test.append(result, ignore_index=True)
+    return(norm_test[['name','normal']])
+
+print('Univariate Normality Test:')
+print(univar_normtest(train))
+
+print('Multivariate Normality Test:')
+stat, p, normal = multivariate_normality(train.select_dtypes(exclude='object').to_numpy())
+print('Statistics=%.3f, p=%.3f' % (stat, p))
+print('Does data set have normal distribution:', normal)
 
