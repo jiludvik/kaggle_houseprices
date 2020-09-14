@@ -7,30 +7,28 @@ import numpy as np
 import pandas as pd
 from datetime import timedelta
 from time import perf_counter
-
 import random
-
 
 #Plotting
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-#Preprocessing
+#Statistics
 from scipy.stats import shapiro, normaltest,anderson
 from pingouin import multivariate_normality
+
+#Preprocessing
 from sklearn.impute import SimpleImputer
-from sklearn.feature_selection import SelectKBest, f_regression, RFECV, RFE
+from sklearn.feature_selection import RFECV, RFE
 from sklearn.pipeline import Pipeline
 
 #Model Selection
 from sklearn.model_selection import cross_val_score, RepeatedStratifiedKFold, StratifiedKFold
 
 #Models
+from sklearn.preprocessing import OrdinalEncoder
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.linear_model import LogisticRegression
-
-#Statistics
-
 
 # Display all columns
 pd.set_option('display.max_columns', None)
@@ -49,9 +47,13 @@ train.name ='train_data'
 test = pd.read_csv('input/test.csv')
 test.name='test_data'
 all_datasets=[train,test]
+
+train_labels = train['SalePrice'].reset_index(drop=True)
 combined = pd.concat([train.drop(['SalePrice'], axis=1),test]).reset_index(drop=True)
+
 print('Training Data Shape:',train.shape)
 print('Test Data Shape:', test.shape)
+print('Combined Data Shape:', combined.shape)
 #%% Check test and train data set have the same columns and data types - MANDATORY
 
 #Function to create a data frame with columns with mismatching names or data types
@@ -87,82 +89,338 @@ print('Min Values\n', train_describe.sort_values(by='max', ascending=False).head
 print ('Standard Deviation\n', train_describe.sort_values(by='std', ascending=False).head(10))
 # Std: similar to max
 
-# Analyse character columns (Object type
-combined_objectcols=combined.select_dtypes(include='object')
-df_unique(combined_objectcols)
-
-
-#%% Fix incorrectly inferred data types - MANDATORY
-
-# Columns with incorrectly inferred data types
-#target_colnames=['OverallCond', 'OverallQual', 'MSSubClass', 'MoSold', 'YrSold', 'GarageYrBlt','YearBuilt','YearRemodAdd']
-#target_colnames=['OverallCond', 'OverallQual', 'MSSubClass']
-target_colnames=['MSSubClass', 'MoSold']
-
-target_dtype=str
-
-# Fix incorrectly inferred data types in 'MoSold', 'YrSold', 'OverallCond', 'MSSubClass' columns
-for dataset in all_datasets:
-    dataset[target_colnames]=dataset[target_colnames].astype(target_dtype)
-
-#%% Analyse missing values - OPTIONAL
+#%% IMPUTE MISSING VALUES, ENCODE LABELS & TRANSFORM DATA TYPES
 
 # Define function to create a data frame with column data types, and missing value stats
 def descriptive_df(df):
-    #df=test
     ddf = pd.DataFrame({'column_name': df.columns,
                                  'data_type' : df.dtypes.astype(str),
                                  'count_missing': df.isnull().sum(),
                                  'percent_missing': df.isnull().sum() * 100 / len(df)})
-    ddf.sort_values('percent_missing', inplace=True, ascending=False)
+    ddf.sort_values(['percent_missing','column_name'], inplace=True, ascending=False)
     return(ddf)
 
-# Create dataframes with descriptive stats
-train_desc_df=descriptive_df(train)
-train_desc_df.name ='Training data'
-test_desc_df=descriptive_df(test)
-test_desc_df.name ='Test data'
-combined_desc_df=descriptive_df(combined)
-combined_desc_df.name ='Training + test data'
+print('Before Transformation')
+print(descriptive_df(combined))
+print()
 
-# Look at columns with missing values in test & train data set
-print('Analysis of missing values')
-for df in [train_desc_df, test_desc_df]:
-    print(df.name)
-    print('----------')
-    print(df.query('count_missing > 0'))
-    print()
+#MSZoning
+combined['MSZoning'].isnull().sum()
+combined['MSZoning'] = combined.groupby('MSSubClass')['MSZoning'].transform(lambda x: x.fillna(x.mode()[0]))
+#sns.boxplot(y=combined['MSSubClass'].astype(int), x=combined['MSZoning'])
+#sns.boxplot(y=combined['MSSubClass'].astype(int), x=combined['Neighborhood'])
+#plt.show()
+combined[combined['MSZoning'].isnull()]
 
-#%% Fill in / impute missing values - MANDATORY
+# MSSubClass, MoSold and YrSold: Convert to string
+combined[['MSSubClass', 'MoSold', 'YrSold']].dtypes
+combined[['MSSubClass', 'MoSold', 'YrSold']]=combined[['MSSubClass', 'MoSold', 'YrSold']].astype(str)
+combined[['MSSubClass', 'MoSold', 'YrSold']].dtypes
 
-impstrategy_popular=['FireplaceQu', 'Electrical', 'Utilities','Functional','KitchenQual','Exterior2nd','Exterior1st','SaleType']
-impstrategy_mean=['GarageCars','GarageArea',
-                  'BsmtHalfBath','BsmtFullBath', 'BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','TotalBsmtSF']
-impstrategy_none=['PoolQC', 'MiscFeature', 'Alley', 'Fence', 'MasVnrType',
-                  'GarageQual','GarageCond','GarageType','GarageFinish',
-                  'BsmtCond','BsmtQual','BsmtExposure','BsmtFinType1','BsmtFinType2']
-impstrategy_0=['MasVnrArea','GarageYrBlt']
+#CentralAir
+combined['CentralAir'].unique()
+combined['CentralAir']=combined['CentralAir'].map({'N':0, 'Y':1})
+combined['CentralAir']=combined['CentralAir'].astype(int)
+combined['CentralAir'].unique()
 
-for dataset in all_datasets:
-    #dataset=train
-    dataset[impstrategy_none] = dataset[impstrategy_none].fillna('None')
-    dataset[impstrategy_0] = dataset[impstrategy_0].fillna(0)
-    for i in impstrategy_popular:# could be probably rewritten with .apply()
-        if i in dataset.columns:
-            dataset[i]=SimpleImputer(strategy='most_frequent').fit_transform(dataset[[i]])
-    for i in impstrategy_mean:
-        if i in dataset.columns:
-            dataset[i]=SimpleImputer(strategy='mean').fit_transform(dataset[[i]])
-    dataset['MSZoning'] = train.groupby('MSSubClass')['MSZoning'].transform(lambda x: x.fillna(x.mode()[0]))
-    dataset['LotFrontage'] = train.groupby(['Neighborhood','BldgType','GarageCars'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
-    dataset['LotFrontage'] = train.groupby(['Neighborhood'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
+# PoolQC: Fill NAs with 'None', map to ordinal values and convert to integer
+combined['PoolQC'].isnull().sum()
+combined['PoolQC'].unique()
+combined['PoolQC']=combined['PoolQC'].fillna('None')
+combined['PoolQC']=combined['PoolQC'].map({'None':0, 'Fa':1, 'TA':2, 'Gd':3, 'Ex':4})
+combined['PoolQC']=combined['PoolQC'].astype(int)
+combined['PoolQC'].isnull().sum()
+combined['PoolQC'].unique()
 
-train.to_csv('train2.csv')
-train.isnull().sum()
-test.isnull().sum()
+#MiscFeature, Alley, Fence = fill NAs with 'None'
+combined[['MiscFeature', 'Alley', 'Fence']].isnull().sum()
+#df_unique(combined[['MiscFeature', 'Alley', 'Fence']])
+combined[['MiscFeature', 'Alley', 'Fence']]=combined[['MiscFeature', 'Alley', 'Fence']].fillna('None')
+combined[['MiscFeature', 'Alley', 'Fence']].isnull().sum()
+#df_unique(combined[['MiscFeature', 'Alley', 'Fence']])
 
-#%% Identify top features 1- MANDATORY
-# Correlation Matrix for Numerical Columns Only - OPTIONAL
+#FireplaceQu: Replace NAs with 'None', map to ordinal values and comvert to integer
+combined['FireplaceQu'].isnull().sum()
+combined['FireplaceQu'].unique()
+combined['FireplaceQu']=combined['FireplaceQu'].fillna('None')
+combined['FireplaceQu']=combined['FireplaceQu'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['FireplaceQu']=combined['FireplaceQu'].astype(int)
+combined['FireplaceQu'].dtypes
+combined['FireplaceQu'].isnull().sum()
+combined['FireplaceQu'].unique()
+
+#LotFrontage: Replace NAs with median value for the neighborhood
+combined['LotFrontage'].isnull().sum()
+combined['LotFrontage'] = combined.groupby(['Neighborhood'])['LotFrontage'].transform(lambda x: x.fillna(x.median()))
+combined['LotFrontage'].isnull().sum()
+
+#LotShape: Map to ordinal values and convert to integer
+combined['LotShape'].isnull().sum()
+combined['LotShape'].unique()
+combined['LotShape']=combined['LotShape'].map({'IR3':0, 'IR2':1, 'IR1':2, 'Reg':3})
+combined['LotShape']=combined['LotShape'].astype(int)
+combined['LotShape'].isnull().sum()
+combined['LotShape'].unique()
+
+#HeatingQC
+combined['HeatingQC'].unique()
+combined['HeatingQC']=combined['HeatingQC'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['HeatingQC']=combined['HeatingQC'].astype(int)
+
+# STAGE 2 (GARAGE)
+
+#print('Missing Values In Garage Variables')
+#print(combined[['GarageYrBlt', 'GarageArea', 'GarageCars', 'GarageQual','GarageCond','GarageType','GarageFinish']].isnull().sum())
+#print('\nUnique Values In Garage Categorical Variables')
+#print(df_unique(combined[['GarageQual','GarageCond','GarageType','GarageFinish']]))
+
+#GarageArea
+combined['GarageArea'].isnull().sum()
+combined['GarageArea']=combined['GarageArea'].fillna(combined['GarageArea'].mode().iloc[0])
+combined['GarageArea'].isnull().sum()
+
+#GarageCars
+combined['GarageCars'].isnull().sum()
+combined['GarageCars']=combined['GarageCars'].fillna(combined['GarageCars'].mode().iloc[0])
+combined['GarageCars']=combined['GarageCars'].astype(int)
+combined['GarageCars'].isnull().sum()
+
+#Rows with GarageYrBlt missing
+# Find rows that have GarageYrBlt==NA and GarageArea>0
+index=combined[(combined['GarageYrBlt'].isnull()) & (combined['GarageArea']>0)].index
+combined.loc[index,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
+#Fix row: GarageYrBlt=YearBuilt, GarageQual= mode, GarageCond=mode
+combined.loc[index,'GarageYrBlt'] = combined.loc[index,'YearBuilt']
+combined.loc[index,'GarageQual']=combined['GarageQual'].mode().iloc[0]
+combined.loc[index,'GarageCond']=combined['GarageCond'].mode().iloc[0]
+combined.loc[index,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
+
+#Properties with no garage
+# Find remaining rows with missing GarageYrBlt, GarageType, GarageFinish
+combined[['GarageYrBlt', 'GarageType', 'GarageFinish']].isnull().sum()
+
+#Create a flag indicating whether a property has a garage
+#combined['No_Garage']=combined['GarageYrBlt'].isnull()
+
+# GarageYrBlt: Replace remaining NAs with 0 and convert to int
+combined['GarageYrBlt'].isnull().sum()
+combined['GarageYrBlt']=combined['GarageYrBlt'].fillna(0)
+combined['GarageYrBlt']=combined['GarageYrBlt'].astype(int)
+combined['GarageYrBlt'].isnull().sum()
+
+# GarageType: Replace NAs with 'None'
+combined['GarageType'].isnull().sum()
+combined['GarageType'].unique()
+combined['GarageType']=combined['GarageType'].fillna('None')
+combined['GarageType'].isnull().sum()
+combined['GarageType'].unique()
+
+# GarageFinish: Replace NAs with 'None', cardinal to ordinal values and data type to integer
+combined['GarageFinish'].isnull().sum()
+combined['GarageFinish'].unique()
+combined['GarageFinish']=combined['GarageFinish'].fillna('None')
+combined['GarageFinish']=combined['GarageFinish'].map({'None':0, 'Unf':1, 'RFn':2, 'Fin':3})
+combined['GarageFinish']=combined['GarageFinish'].astype(int)
+combined['GarageFinish'].isnull().sum()
+combined['GarageFinish'].unique()
+
+# GarageQual: Replace NAs with 'None', cardinal to ordinal values and data type to integer
+combined['GarageQual'].isnull().sum()
+combined['GarageQual'].unique()
+combined['GarageQual']=combined['GarageQual'].fillna('None')
+combined['GarageQual']=combined['GarageQual'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['GarageQual']=combined['GarageQual'].astype(int)
+combined['GarageQual'].unique()
+combined['GarageQual'].isnull().sum()
+
+# GarageCond: Replace NAs with 'None', cardinal to ordinal values and data type to integer
+combined['GarageCond'].isnull().sum()
+combined['GarageCond'].unique()
+combined['GarageCond']=combined['GarageCond'].fillna('None')
+combined['GarageCond']=combined['GarageCond'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['GarageCond']=combined['GarageCond'].astype(int)
+combined['GarageCond'].isnull().sum()
+combined['GarageCond'].unique()
+
+#print('Missing Values In Garage Variables')
+#print(combined[['GarageYrBlt','GarageQual','GarageCond','GarageType','GarageFinish']].isnull().sum())
+#print('\nUnique Values In Garage Categoric Variables')
+#print(df_unique(combined[['GarageQual','GarageCond','GarageType','GarageFinish']]))
+
+#STAGE 3 - BASEMENT
+
+#print('Missing Values In Basement Variables')
+#print(combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']].isnull().sum())
+#print('\nUnique Values In Garage Categoric Variables')
+#print(df_unique(combined[['BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']]))
+
+# TotalBsmtSF,'BsmtFinSF1,BsmtFinSF2,BsmtUnfSF
+combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF']].isnull().sum()
+# Find out which rows have missing Basement square footage values
+index=combined[combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF']].isnull().sum(axis=1)>0].index
+# Fix Square footage values: replace with 0 (ie there is no Basement)
+combined.loc[index,['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF']]=[0,0,0,0]
+combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF']].isnull().sum()
+
+# BsmtQual
+combined['BsmtQual'].isnull().sum()
+combined['BsmtQual'].unique()
+# Fill in BsmtQual for rows with TotalBSMTSF>0 with most frequent value
+index=combined[(combined['BsmtQual'].isnull()) & (combined['TotalBsmtSF']>0)].index
+combined.loc[index,['BsmtQual']]=combined['BsmtQual'].mode().iloc[0]
+# Fill the rest (i.e. houses that do not have a basement) with None
+combined['BsmtQual']=combined['BsmtQual'].fillna('None')
+combined['BsmtQual']=combined['BsmtQual'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['BsmtQual']=combined['BsmtQual'].astype(int)
+combined['BsmtQual'].isnull().sum()
+combined['BsmtQual'].unique()
+
+# BsmtCond
+combined['BsmtCond'].isnull().sum()
+combined['BsmtCond'].unique()
+#Values with TotalBsmtSF>0 will be populated with most frequent value
+index=combined[(combined['BsmtCond'].isnull()) & (combined['TotalBsmtSF']>0)].index
+combined.loc[index,['BsmtCond']]=[combined['BsmtCond'].mode().iloc[0]] * len(index)
+combined['BsmtCond'].isnull().sum()
+#Remaining missing values (corresponding to properties with no basement) will get 'None'
+combined['BsmtCond']=combined['BsmtCond'].fillna('None')
+combined['BsmtCond']=combined['BsmtCond'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['BsmtCond']=combined['BsmtCond'].astype(int)
+combined['BsmtCond'].isnull().sum()
+combined['BsmtCond'].unique()
+
+# BsmtExposure
+combined['BsmtExposure'].isnull().sum()
+combined['BsmtExposure'].unique()
+# Rows with missing values corresponding to properties with basement will be populated by most frequent value
+index=combined[(combined['BsmtExposure'].isnull()) & (combined['TotalBsmtSF']>0)].index
+combined.loc[index,['BsmtExposure']]=combined['BsmtExposure'].mode().iloc[0]
+combined['BsmtExposure'].isnull().sum()
+# Remaining with missing values for the remaining properties will be populated with 'None'
+combined['BsmtExposure']=combined['BsmtExposure'].fillna('None')
+combined['BsmtExposure']=combined['BsmtExposure'].map({'None':0, 'No':0, 'Mn':1, 'Av':2, 'Gd':3})
+combined['BsmtExposure']=combined['BsmtExposure'].astype(int)
+combined['BsmtExposure'].isnull().sum()
+combined['BsmtExposure'].unique()
+
+#BsmtFinType1
+combined['BsmtFinType1'].isnull().sum()
+combined['BsmtFinType1'].unique()
+# Missing values corresponding to properties with BsmtFinSF1>0 or BsmtUnfSF>0
+combined[(combined['BsmtFinType1'].isnull()) & ((combined['BsmtFinSF1']>0)| (combined['BsmtUnfSF']>0))].index
+# no values with SF>0 -> no specific fixing needed
+# Remaining missing values for the remaining properties will be populated with 'None'
+combined['BsmtFinType1']=combined['BsmtFinType1'].fillna('None')
+combined['BsmtFinType1']=combined['BsmtFinType1'].map({'None':0, 'Unf':1, 'LwQ':1, 'Rec':2, 'BLQ':3, 'ALQ':4, 'GLQ':5})
+combined['BsmtFinType1']=combined['BsmtFinType1'].astype(int)
+combined['BsmtFinType1'].isnull().sum()
+combined['BsmtFinType1'].unique()
+
+#BsmtFinType2
+combined['BsmtFinType2'].isnull().sum()
+combined['BsmtFinType2'].unique()
+# Missing values corresponding to properties with BsmtFinSF1>0 or BsmtUnfSF>0
+index=combined[(combined['BsmtFinType2'].isnull()) & ((combined['BsmtFinSF2']>0)| (combined['BsmtUnfSF']>0))].index
+combined.loc[index,['BsmtFinType2']]=combined['BsmtFinType2'].mode().iloc[0]
+# Remaining missing values for the remaining properties will be populated with 'None'
+combined['BsmtFinType2']=combined['BsmtFinType2'].fillna('None')
+combined['BsmtFinType2']=combined['BsmtFinType2'].map({'None':0, 'Unf':1, 'LwQ':1, 'Rec':2, 'BLQ':3, 'ALQ':4, 'GLQ':5})
+combined['BsmtFinType2']=combined['BsmtFinType2'].astype(int)
+combined['BsmtFinType2'].isnull().sum()
+combined['BsmtFinType2'].unique()
+
+#BsmtFullBath, BsmtHalfBath
+combined[['BsmtFullBath','BsmtHalfBath']].isnull().sum()
+#df_unique(combined[['BsmtFullBath','BsmtHalfBath']])
+combined['BsmtFullBath']=combined['BsmtFullBath'].fillna(combined['BsmtFullBath'].mode().iloc[0])
+combined['BsmtHalfBath']=combined['BsmtHalfBath'].fillna(combined['BsmtHalfBath'].mode().iloc[0])
+combined['BsmtHalfBath']=combined['BsmtHalfBath'].astype(int)
+combined['BsmtFullBath']=combined['BsmtFullBath'].astype(int)
+combined[['BsmtFullBath','BsmtHalfBath']].isnull().sum()
+#df_unique(combined[['BsmtFullBath','BsmtHalfBath']])
+
+#print('Missing Values In Basement Variables')
+#print(combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']].isnull().sum())
+#print('\nUnique Values In Garage Categoric Variables')
+#print(df_unique(combined[['BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']]))
+
+# STAGE 4 - REMAINDER OF VARIABLES
+# MasVnrArea & MasVnrType
+combined[['MasVnrType','MasVnrArea']].isnull().sum()
+combined['MasVnrType'].unique()
+#replace MasVnrType for property that have MasVnrAre>0 or not null by mode()
+index=combined[(combined['MasVnrType'].isnull()) & ((combined['MasVnrArea']>0) | (combined['MasVnrArea'].notnull()))].index
+combined.loc[index,['MasVnrType']]=combined['MasVnrType'].mode().iloc[0]
+# For the rest of the properties, we will assume MasVnrArea=0 and MasVnrType=None
+combined['MasVnrArea']=combined['MasVnrArea'].fillna(0)
+combined['MasVnrType']=combined['MasVnrType'].fillna('None')
+#sns.boxplot(x='MasVnrType',y='SalePrice',data=train), plt.show()
+combined['MasVnrType']=combined['MasVnrType'].map({'None':0, 'BrkCmn':0, 'CBlock':1, 'BrkFace':2, 'Stone':3})
+combined['MasVnrType']=combined['MasVnrType'].astype(int)
+combined[['MasVnrType','MasVnrArea']].isnull().sum()
+combined['MasVnrType'].unique()
+
+#KitchenQual
+combined['KitchenQual'].isnull().sum()
+combined['KitchenQual'].unique()
+combined['KitchenQual']=combined['KitchenQual'].fillna(combined['KitchenQual'].mode().iloc[0])
+combined['KitchenQual']=combined['KitchenQual'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['KitchenQual']=combined['MasVnrType'].astype(int)
+combined['KitchenQual'].isnull().sum()
+combined['KitchenQual'].unique()
+
+#Utilities
+combined=combined.drop('Utilities',axis=1)
+
+#Functional
+combined['Functional'].isnull().sum()
+combined['Functional'].unique()
+combined['Functional']=combined['Functional'].fillna(combined['Functional'].mode().iloc[0])
+combined['Functional']=combined['Functional'].map({'Sal':0, 'Sev':1, 'Maj2':2, 'Maj1':3, 'Mod':4, 'Min2':5, 'Min1':6, 'Typ':7})
+combined['Functional']=combined['Functional'].astype(int)
+combined['Functional'].isnull().sum()
+combined['Functional'].unique()
+
+#Exterior1st, Exterior2nd, ExteriorQual
+combined[['Exterior1st','Exterior2nd','ExterQual', 'ExterCond']].isnull().sum()
+combined['Exterior1st']=combined['Exterior1st'].fillna(combined['Exterior1st'].mode().iloc[0])
+combined['Exterior2nd']=combined['Exterior2nd'].fillna(combined['Exterior2nd'].mode().iloc[0])
+combined['ExterQual']=combined['ExterQual'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['ExterCond']=combined['ExterCond'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
+combined['ExterQual']=combined['ExterQual'].astype(int)
+combined['ExterCond']=combined['ExterCond'].astype(int)
+#df_unique(combined[['Exterior1st','Exterior2nd','ExterQual', 'ExterCond']])
+
+#Electrical
+combined['Electrical'].isnull().sum()
+combined['Electrical'].unique()
+combined['Electrical']=combined['Electrical'].fillna(combined['Electrical'].mode().iloc[0])
+combined['Electrical'].isnull().sum()
+
+#SaleType
+combined[['SaleType']].isnull().sum()
+combined['SaleType']=combined['SaleType'].fillna(combined['SaleType'].mode().iloc[0])
+combined[['SaleType']].isnull().sum()
+
+#Summarise missing values and data types
+print('After Transformation')
+print(descriptive_df(combined))
+print()
+
+#%% Recreate training and test data sets after imputation and label encoding
+# training dataset with imputed values and encoded labels
+train2_x = combined.iloc[:len(train_labels), :]
+train2_y=train['SalePrice']
+train2=pd.concat([train2_y, train2_x.reindex(train2_y.index)], axis=1)
+print('Training data shape before / after transformation:', train.shape,'/', train2.shape)
+
+# test data set
+test2 = combined.iloc[len(train_labels):, :]
+print('Test data shape before / after transformation:', test.shape,'/', test2.shape)
+
+#%% Identify top features with Correlation Matrix- MANDATORY
+
+# Correlation Matrix for Numerical Columns Only
 def heatmap(data, title=None, annot=True, annot_fontsize=12):
     _, ax = plt.subplots(figsize=(14, 12))
     colormap = sns.diverging_palette(220, 10, as_cmap=True)
@@ -184,7 +442,7 @@ def df_fill_diagonal(df, val, wrap=False):
     np.fill_diagonal(a=arr,val=val,wrap=wrap)
     return(pd.DataFrame(arr, index=df.index, columns=df.columns))
 
-# Function to filter correlation matrix to include only values beyond certainthershol
+# Function to filter correlation matrix to include only values beyond certain thershold
 def filter_corrmatrix(corr, corr_threshold):
     corr=df_fill_diagonal(corr,0)
     filtered = corr[(corr.abs() >= corr_threshold).any(axis=1)]
@@ -192,33 +450,38 @@ def filter_corrmatrix(corr, corr_threshold):
     filtered = df_fill_diagonal(filtered, 1)
     return(filtered)
 
-num_cols = train.select_dtypes(exclude='object').columns
-corr_matrix = filter_corrmatrix (train[num_cols].corr(),0.5)
-heatmap(corr_matrix, title='Correlation - Numerical Features')
+num_cols = train2.select_dtypes(exclude='object').columns
+corr_matrix = filter_corrmatrix (train2[num_cols].corr(),0.5)
+heatmap(corr_matrix, title='Correlation - Numerical Features', annot_fontsize=8)
 plt.show()
 
-#Top numerical variables correlated with SalePrice are"
-# OverallQual, GrLivArea, GarageCars+GarageArea, TotalBsmtSF+1stFlrSF
+#Top numerical variables correlated with SalePrice (corr>0.6):
+# OverallQual, GrLivArea, ExterQual, GarageCars, GarageArea, TotalBsmtSF, 1stFlrSF
 
-# Floor Space is mutually correlated, Garage variables are mutually correlated
+#Mutual correlations - NEED REVISITING IF USED TO CLEAN UP DATA BEFORE MODELLING
+# Dif types of square Footage
+# Square Footage & No of Rooms
+# Garage variables
 
-#%% Identify top features 2- MANDATORY
-#Generate dummy variables
-train_encoded_x= pd.get_dummies(train.drop(['SalePrice','Id'], axis=1), drop_first=True)
-train_encoded_y=train['SalePrice']
-train_encoded=pd.concat([train_encoded_y, train_encoded_x.reindex(train_encoded_y.index)], axis=1)
+#%% Identify top features with RFE- MANDATORY
+
+#Generate a temporary data frame with remainder of categorical variables converted to dummy vars
+# this is just temporary, as we will need to make further conversions before generating final version of the encoded dataframe
+train3_x= pd.get_dummies(train2.drop(['SalePrice','Id'], axis=1), drop_first=True)
+train3_y=train2['SalePrice']
+train3=pd.concat([train3_y, train3_x.reindex(train3_y.index)], axis=1)
 
 # Top features By RFE
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
 top_features_no=10
 selector_rfe = RFE(estimator=DecisionTreeRegressor(), n_features_to_select=top_features_no)
-selector_rfe.fit(train_encoded_x,train_encoded_y)
-best_features_rfe=train_encoded_x.columns[selector_rfe.support_]
+selector_rfe.fit(train3_x,train3_y)
+best_features_rfe=train3_x.columns[selector_rfe.support_]
 print ('Top', top_features_no,'Predictors by RFE with DecisionTreeRegressor')
 print(best_features_rfe)
 
-# SalePrice + Best Predictors (LotFrontage', 'OverallQual', 'YearBuilt', 'BsmtFinSF1',
-# 'TotalBsmtSF','1stFlrSF', '2ndFlrSF', 'GrLivArea', 'GarageCars', 'GarageArea)
+# LotFrontage, LotArea, OverallQual, YearBuilt, BsmtFinSF1,
+# TotalBsmtSF,1stFlrSF, 2ndFlrSF, GrLivArea, GarageCars
 
 # Optimum feature selection using RFECV
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
@@ -227,11 +490,11 @@ scoring_method='neg_mean_squared_error'
 cv_method = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=0)
 model = DecisionTreeRegressor()
 selector_rfecv = RFECV(estimator=model, scoring=scoring_method, n_jobs=-1, cv=cv_method)
-selector_rfecv.fit(train_encoded_x,train_encoded_y)
+selector_rfecv.fit(train3_x,train3_y)
 time_stop = perf_counter()
-best_features_rfecv=train_encoded_x.columns[selector_rfecv.support_]
+best_features_rfecv=train3_x.columns[selector_rfecv.support_]
 print('Best Features By RFECV with DecisionTreeClassifier')
-print (len(best_features_rfecv),'out of', len(train_encoded_x.columns),'columns')
+print (len(best_features_rfecv),'out of', len(train3_x.columns),'columns')
 print (best_features_rfecv)
 print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
 
@@ -245,22 +508,7 @@ print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
 #       Scatter plot for continuous, bar plot for factors
 #   Can/should the variable be grouped with others?:
 #       Scatter plot / bar plot for all variables in the group
-#   Are there any categorical values with low number of observations?
-#       Groupby + clustering
-#   Outliers: method tbc
 
-#Best predictors
-#    'BsmtFinSF1', 'TotalBsmtSF', '1stFlrSF', '2ndFlrSF', 'GrLivArea',
-
-# OverallQual
-# YearBuilt
-# Neighborhood
-# LotFrontage, LotArea
-# 'GarageCars', 'GarageArea
-
-# LotArea?
-
-#https://towardsdatascience.com/a-starter-pack-to-exploratory-data-analysis-with-python-pandas-seaborn-and-scikit-learn-a77889485baf
 
 def mydistplot(x, data=None, x_label=None, y_label=None, title=None, show=True):
     plot = sns.distplot(data[x]);
@@ -295,12 +543,8 @@ def mylmplot(x=None, y=None, data=None, title=None, show=True):
     else:
         return(plot)
 
-#1. SALEPRICE
+#SALEPRICE
 mydistplot('SalePrice', train, y_label="Frequency", title="SalePrice Distribution", show=True)
-
-# Scatter plot with fill color driven by a variable
-#plot3=sns.scatterplot(x=train['Neighborhood'], y=train['SalePrice'], hue=train['BldgType'].tolist())
-#plt.show()
 
 #SALEPRICE BY NEIGBOURGHOOD
 plot=sns.stripplot(x=train['Neighborhood'], y=train['SalePrice'], hue=train['OverallQual'].tolist(), alpha=.25 )
@@ -333,33 +577,27 @@ mylmplot(y='SalePrice', x='2ndFlrSF', data=train, title="SalePrice by 2ndFlrSF")
 #SALEPRICE BY GarageCars & GarageArea
 myboxplot (x='GarageCars',y='SalePrice', data=train, title='SalePrice by GarageCars', h_line=train['SalePrice'].mean())
 mylmplot(x='GarageArea', y='SalePrice', data=train, title="SalePrice by GarageArea")
+
 # SalePrice goes down after 4th car - most people have max 4 cars?
 # or no-one is recording car space beyond 5 cars
-
 # Question: Zero values in 2nd FlrSF, BsmtFinSF1, GarageArea are skewing distribution
 
 
 #%% Normality test of all variables
-def univar_normtest(data=None):
-    norm_test_cols=['name','normal', 'shapiro_gauss','dagostino_gauss','anderson_gauss','shapiro_stat','shapiro_p','dagostino_stat','dagostino_p','andreson_crit_val','andreson_stat']
-    norm_test=pd.DataFrame(columns=norm_test_cols)
-    for col in data.select_dtypes(exclude='object').columns:
-        shapiro_stat, shapiro_p = shapiro(data[col])
-        shapiro_result=(shapiro_p>0.05)
-        dagost_stat, dagost_p = normaltest(data[col])
-        dagost_result = (dagost_p>0.05)
-        anders = anderson(data[col])
-        anders_result=(anders.statistic < anders.critical_values[2])
-        result=shapiro_result or dagost_result or anders_result
-        result=pd.DataFrame([[col,result, shapiro_result, dagost_result,anders_result, shapiro_stat, shapiro_p, dagost_stat, dagost_p,anders.critical_values[2], anders.statistic]], columns=norm_test_cols)
-        norm_test = norm_test.append(result, ignore_index=True)
-    return(norm_test[['name','normal']])
-
-print('Univariate Normality Test:')
-print(univar_normtest(train))
 
 print('Multivariate Normality Test:')
 stat, p, normal = multivariate_normality(train.select_dtypes(exclude='object').to_numpy())
 print('Statistics=%.3f, p=%.3f' % (stat, p))
 print('Does data set have normal distribution:', normal)
 
+
+#%% TOMORROW
+# 3) Feature engineering
+# Go through both notebooks and pick up useful ideas
+# Try to run column clustering on the data set?
+
+# 2) Go through categorical values with low number of observations
+
+
+# 4)  Outlier identification: method tbc
+#https://machinelearningmastery.com/model-based-outlier-detection-and-removal-in-python/
