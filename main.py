@@ -1,34 +1,34 @@
 # KAGGLE HOUSE PRICES: ADVANCED REGRESSION TECHNIQUES
 
-#%% Load Libraries and Set Global Options - MANDATORY
+#%% LOAD LIBRARIES - MANDATORY
 
 #Essentials
 import numpy as np
 import pandas as pd
 from datetime import timedelta
 from time import perf_counter
-import random
 
 #Plotting
 import seaborn as sns
 import matplotlib.pyplot as plt
 
 #Statistics
-from scipy.stats import shapiro, normaltest,anderson
-from pingouin import multivariate_normality
+from scipy.stats import skew
 
 #Preprocessing
-from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import PowerTransformer, RobustScaler
 from sklearn.feature_selection import RFECV, RFE
-from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_error
+from sklearn.pipeline import make_pipeline
 
 #Model Selection
-from sklearn.model_selection import cross_val_score, RepeatedStratifiedKFold, StratifiedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold, KFold, cross_validate
+from sklearn.model_selection import GridSearchCV
 
 #Models
-from sklearn.preprocessing import OrdinalEncoder
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import Lasso
+from xgboost import XGBRegressor
 
 # Display all columns
 pd.set_option('display.max_columns', None)
@@ -41,12 +41,13 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 pd.options.display.max_seq_items = 8000
 pd.options.display.max_rows = 8000
 
-#%% Load data - MANDATORY
+#%% LOAD DATA - MANDATORY
+
+# load data
 train = pd.read_csv('input/train.csv')
 train.name ='train_data'
 test = pd.read_csv('input/test.csv')
 test.name='test_data'
-all_datasets=[train,test]
 
 train_labels = train['SalePrice'].reset_index(drop=True)
 combined = pd.concat([train.drop(['SalePrice'], axis=1),test]).reset_index(drop=True)
@@ -54,7 +55,6 @@ combined = pd.concat([train.drop(['SalePrice'], axis=1),test]).reset_index(drop=
 print('Training Data Shape:',train.shape)
 print('Test Data Shape:', test.shape)
 print('Combined Data Shape:', combined.shape)
-#%% Check test and train data set have the same columns and data types - MANDATORY
 
 #Function to create a data frame with columns with mismatching names or data types
 def schema_issues(df1=None,df2=None):
@@ -66,11 +66,11 @@ def schema_issues(df1=None,df2=None):
     result=result.query('colname_issue or dtype_issue')
     return(result)
 
-#report on differences in column names and dtypes between test & train data sets
+#Report on differences in column names and dtypes between test & train data sets
 print('Test and training data set columns with mismatched names or data types')
 print(schema_issues(train,test))
 
-#%% Summarise data - OPTIONAL
+#%% SUMMARISE DATA - OPTIONAL
 
 # Function to print unique values in each column of a data frame
 def df_unique(df):
@@ -89,7 +89,7 @@ print('Min Values\n', train_describe.sort_values(by='max', ascending=False).head
 print ('Standard Deviation\n', train_describe.sort_values(by='std', ascending=False).head(10))
 # Std: similar to max
 
-#%% IMPUTE MISSING VALUES, ENCODE LABELS & TRANSFORM DATA TYPES
+#%% IMPUTE MISSING VALUES & ENCODE ORDINAL VALUES  - MANDATORY
 
 # Define function to create a data frame with column data types, and missing value stats
 def descriptive_df(df):
@@ -167,12 +167,7 @@ combined['HeatingQC'].unique()
 combined['HeatingQC']=combined['HeatingQC'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
 combined['HeatingQC']=combined['HeatingQC'].astype(int)
 
-# STAGE 2 (GARAGE)
-
-#print('Missing Values In Garage Variables')
-#print(combined[['GarageYrBlt', 'GarageArea', 'GarageCars', 'GarageQual','GarageCond','GarageType','GarageFinish']].isnull().sum())
-#print('\nUnique Values In Garage Categorical Variables')
-#print(df_unique(combined[['GarageQual','GarageCond','GarageType','GarageFinish']]))
+# GARAGE VARIABLES
 
 #GarageArea
 combined['GarageArea'].isnull().sum()
@@ -187,13 +182,13 @@ combined['GarageCars'].isnull().sum()
 
 #Rows with GarageYrBlt missing
 # Find rows that have GarageYrBlt==NA and GarageArea>0
-index=combined[(combined['GarageYrBlt'].isnull()) & (combined['GarageArea']>0)].index
-combined.loc[index,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
+missinggarage_row=combined[(combined['GarageYrBlt'].isnull()) & (combined['GarageArea']>0)].index
+combined.loc[missinggarage_row,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
 #Fix row: GarageYrBlt=YearBuilt, GarageQual= mode, GarageCond=mode
-combined.loc[index,'GarageYrBlt'] = combined.loc[index,'YearBuilt']
-combined.loc[index,'GarageQual']=combined['GarageQual'].mode().iloc[0]
-combined.loc[index,'GarageCond']=combined['GarageCond'].mode().iloc[0]
-combined.loc[index,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
+combined.loc[missinggarage_row,'GarageYrBlt'] = combined.loc[missinggarage_row,'YearBuilt']
+combined.loc[missinggarage_row,'GarageQual']=combined['GarageQual'].mode().iloc[0]
+combined.loc[missinggarage_row,'GarageCond']=combined['GarageCond'].mode().iloc[0]
+combined.loc[missinggarage_row,['GarageArea','GarageYrBlt','GarageQual','GarageCond']]
 
 #Properties with no garage
 # Find remaining rows with missing GarageYrBlt, GarageType, GarageFinish
@@ -242,17 +237,7 @@ combined['GarageCond']=combined['GarageCond'].astype(int)
 combined['GarageCond'].isnull().sum()
 combined['GarageCond'].unique()
 
-#print('Missing Values In Garage Variables')
-#print(combined[['GarageYrBlt','GarageQual','GarageCond','GarageType','GarageFinish']].isnull().sum())
-#print('\nUnique Values In Garage Categoric Variables')
-#print(df_unique(combined[['GarageQual','GarageCond','GarageType','GarageFinish']]))
-
-#STAGE 3 - BASEMENT
-
-#print('Missing Values In Basement Variables')
-#print(combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']].isnull().sum())
-#print('\nUnique Values In Garage Categoric Variables')
-#print(df_unique(combined[['BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']]))
+#BASEMENT VARIABLES
 
 # TotalBsmtSF,'BsmtFinSF1,BsmtFinSF2,BsmtUnfSF
 combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF']].isnull().sum()
@@ -339,12 +324,7 @@ combined['BsmtFullBath']=combined['BsmtFullBath'].astype(int)
 combined[['BsmtFullBath','BsmtHalfBath']].isnull().sum()
 #df_unique(combined[['BsmtFullBath','BsmtHalfBath']])
 
-#print('Missing Values In Basement Variables')
-#print(combined[['TotalBsmtSF','BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']].isnull().sum())
-#print('\nUnique Values In Garage Categoric Variables')
-#print(df_unique(combined[['BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1','BsmtFinType2']]))
-
-# STAGE 4 - REMAINDER OF VARIABLES
+# REMAINDER OF VARIABLES
 # MasVnrArea & MasVnrType
 combined[['MasVnrType','MasVnrArea']].isnull().sum()
 combined['MasVnrType'].unique()
@@ -365,7 +345,7 @@ combined['KitchenQual'].isnull().sum()
 combined['KitchenQual'].unique()
 combined['KitchenQual']=combined['KitchenQual'].fillna(combined['KitchenQual'].mode().iloc[0])
 combined['KitchenQual']=combined['KitchenQual'].map({'None':0, 'Po':1, 'Fa':2, 'TA':3, 'Gd':4, 'Ex':5})
-combined['KitchenQual']=combined['MasVnrType'].astype(int)
+combined['KitchenQual']=combined['KitchenQual'].astype(int)
 combined['KitchenQual'].isnull().sum()
 combined['KitchenQual'].unique()
 
@@ -402,23 +382,74 @@ combined[['SaleType']].isnull().sum()
 combined['SaleType']=combined['SaleType'].fillna(combined['SaleType'].mode().iloc[0])
 combined[['SaleType']].isnull().sum()
 
+#Street
+combined['Street'].unique()
+combined['Street']=combined['Street'].map({'Grvl':0, 'Pave':1})
+combined['Street']=combined['Street'].astype(int)
+
+#PavedDrive
+combined['PavedDrive'].unique()
+combined['PavedDrive']=combined['PavedDrive'].map({'N':0, 'P':1, 'Y':2})
+combined['PavedDrive']=combined['PavedDrive'].astype(int)
+combined['PavedDrive'].unique()
+
+#Id
+combined=combined.drop('Id', axis=1)
+
 #Summarise missing values and data types
 print('After Transformation')
 print(descriptive_df(combined))
 print()
 
-#%% Recreate training and test data sets after imputation and label encoding
+#%% FEATURE ENGINEERING - MANDATORY
+#https://www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda and
+
+combined['TotalBathrooms']=combined['FullBath']+combined['BsmtFullBath']+0.5*combined['HalfBath']+0.5*combined['BsmtHalfBath']
+yrsold_issue_index=combined[combined['YrSold'].astype(int)<combined['YearBuilt']].index
+combined.loc[yrsold_issue_index,'YrSold']=combined.loc[yrsold_issue_index,'YearBuilt']
+combined['Age']=combined['YrSold'].astype(int)-combined['YearBuilt']
+neighborhood_map={'MeadowV':0, 'IDOTRR':0, 'BrDale':0,
+              'StoneBr':2, 'NridgHt':2, 'NoRidge':2,
+              'CollgCr':1, 'Veenker':1, 'Crawfor':1,  'Mitchel':1, 'Somerst':1,'NWAmes':1,
+              'OldTown':1, 'BrkSide':1, 'Sawyer':1,  'NAmes':1,'SawyerW':1,  'Edwards':1,
+              'Timber':1, 'Gilbert':1,'ClearCr':1, 'NPkVill':1, 'Blmngtn':1,  'SWISU':1,'Blueste':1}
+
+combined['NeighborAffl']=combined['Neighborhood'].map(neighborhood_map)
+combined['TotalSqFeet']=combined['GrLivArea']+combined['TotalBsmtSF']
+combined['TotalPorchSF']=combined['OpenPorchSF'] + combined['EnclosedPorch'] + combined['3SsnPorch'] + combined['ScreenPorch']
+
+#generate binary variables
+combined['IsRemodelled']=(combined['YearBuilt']!=combined['YearRemodAdd'])
+combined['NewBuild']=(combined['YrSold']==combined['YearBuilt'])
+combined['HasPool'] = combined['PoolArea'].apply(lambda x: 1 if x > 0 else 0)
+#sns.boxplot(x=train2['HasPool'], y=train2['SalePrice']), plt.show()
+combined['HasGarage'] = combined['GarageArea'].apply(lambda x: 1 if x > 0 else 0)
+#sns.boxplot(x=train2['HasGarage'], y=train2['SalePrice']), plt.show()
+combined['HasBsmt'] = combined['TotalBsmtSF'].apply(lambda x: 1 if x > 0 else 0)
+#sns.boxplot(x=train2['HasBsmt'], y=train2['SalePrice']), plt.show()
+combined['HasFireplace'] = combined['Fireplaces'].apply(lambda x: 1 if x > 0 else 0)
+#sns.boxplot(x=train2['HasFireplace'], y=train2['SalePrice']), plt.show()
+combined['Has2ndFloor'] = combined['2ndFlrSF'].apply(lambda x: 1 if x > 0 else 0)
+
+#Create an index with all binary variables required for further data transformations
+binary_numcols=['IsRemodelled', 'NewBuild','HasPool','HasGarage',
+                'HasBsmt','HasFireplace','Has2ndFloor','CentralAir','Street']
+
+#%% RECREATE TRAINING DATASET FOR THE PURPOSE OF EDA - MANDATORY
+
 # training dataset with imputed values and encoded labels
 train2_x = combined.iloc[:len(train_labels), :]
 train2_y=train['SalePrice']
+
 train2=pd.concat([train2_y, train2_x.reindex(train2_y.index)], axis=1)
-print('Training data shape before / after transformation:', train.shape,'/', train2.shape)
+print('Training data shape before / after imputation & feat. eng.:', train.shape,'/', train2.shape)
+train2_x.shape
 
-# test data set
+# test data set with imputed values and encoded labels
 test2 = combined.iloc[len(train_labels):, :]
-print('Test data shape before / after transformation:', test.shape,'/', test2.shape)
+print('Test data shape before / after imputation & feat.eng.:', test.shape,'/', test2.shape)
 
-#%% Identify top features with Correlation Matrix- MANDATORY
+#%% EDA: IDENTIFY TOP NUMERICAL FEATURES WITH CORR.MATRIX & RFE - MANDATORY
 
 # Correlation Matrix for Numerical Columns Only
 def heatmap(data, title=None, annot=True, annot_fontsize=12):
@@ -455,50 +486,41 @@ corr_matrix = filter_corrmatrix (train2[num_cols].corr(),0.5)
 heatmap(corr_matrix, title='Correlation - Numerical Features', annot_fontsize=8)
 plt.show()
 
-#Top numerical variables correlated with SalePrice (corr>0.6):
+#Top variables correlated with SalePrice (corr>0.6) Before Feature Engineering:
 # OverallQual, GrLivArea, ExterQual, GarageCars, GarageArea, TotalBsmtSF, 1stFlrSF
-
-#Mutual correlations - NEED REVISITING IF USED TO CLEAN UP DATA BEFORE MODELLING
-# Dif types of square Footage
-# Square Footage & No of Rooms
-# Garage variables
-
-#%% Identify top features with RFE- MANDATORY
-
-#Generate a temporary data frame with remainder of categorical variables converted to dummy vars
-# this is just temporary, as we will need to make further conversions before generating final version of the encoded dataframe
-train3_x= pd.get_dummies(train2.drop(['SalePrice','Id'], axis=1), drop_first=True)
-train3_y=train2['SalePrice']
-train3=pd.concat([train3_y, train3_x.reindex(train3_y.index)], axis=1)
+#Top variables correlated with SalePrice (corr>0.6) After Feature Engineering:
+#OverallQual, TotalSqFeet,GrLivArea,ExterQual,GarageCars, TotalBathrooms, GarageArea,1stFloorSF, TotalBsmtSF
 
 # Top features By RFE
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
 top_features_no=10
 selector_rfe = RFE(estimator=DecisionTreeRegressor(), n_features_to_select=top_features_no)
-selector_rfe.fit(train3_x,train3_y)
-best_features_rfe=train3_x.columns[selector_rfe.support_]
+train2num_x=train2_x.select_dtypes(exclude='object')
+selector_rfe.fit(train2num_x,train2_y)
+best_features_rfe=train2num_x.columns[selector_rfe.support_]
 print ('Top', top_features_no,'Predictors by RFE with DecisionTreeRegressor')
 print(best_features_rfe)
 
-# LotFrontage, LotArea, OverallQual, YearBuilt, BsmtFinSF1,
-# TotalBsmtSF,1stFlrSF, 2ndFlrSF, GrLivArea, GarageCars
+#LotArea', 'OverallQual', 'YearRemodAdd', 'BsmtFinSF1', 'TotalBsmtSF',
+#       '2ndFlrSF', 'GrLivArea', 'GarageArea', 'Age', 'TotalSqFeet'
 
-# Optimum feature selection using RFECV
+#%% EDA: IDENTIFY OPTIMUM FEATURES USING RFECV - OPTIONAL - CAN BE LEFT FOR LATER
+
 # https://machinelearningmastery.com/rfe-feature-selection-in-python/
 time_start = perf_counter()
 scoring_method='neg_mean_squared_error'
 cv_method = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=0)
 model = DecisionTreeRegressor()
 selector_rfecv = RFECV(estimator=model, scoring=scoring_method, n_jobs=-1, cv=cv_method)
-selector_rfecv.fit(train3_x,train3_y)
+selector_rfecv.fit(train2num_x,train2_y)
 time_stop = perf_counter()
-best_features_rfecv=train3_x.columns[selector_rfecv.support_]
+best_features_rfecv=train2num_x.columns[selector_rfecv.support_]
 print('Best Features By RFECV with DecisionTreeClassifier')
-print (len(best_features_rfecv),'out of', len(train3_x.columns),'columns')
+print (len(best_features_rfecv),'out of', len(train2_x.columns),'columns')
 print (best_features_rfecv)
 print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
 
-#%% Exploratory Data Analysis
+#%% EDA: RELATIONSHIP BETWEEN TOP VARIABLES - OPTIONAL
 
 #Topics / Functions for EDA
 #   Is the variable normally distributed? :
@@ -582,22 +604,194 @@ mylmplot(x='GarageArea', y='SalePrice', data=train, title="SalePrice by GarageAr
 # or no-one is recording car space beyond 5 cars
 # Question: Zero values in 2nd FlrSF, BsmtFinSF1, GarageArea are skewing distribution
 
+#%% REMOVE OUTLIERS IN COMBINED & TRAINING DATA - MANDATORY
+# create new transformed combined and training data sets (with outliers removed)
 
-#%% Normality test of all variables
+outlier_rows=train2[(train2['OverallQual']<5) & (train2['SalePrice']>200000)].index.\
+    union(train2[(train2['GrLivArea']>4500) & (train2['SalePrice']<300000)].index)
+print('Outlier rows:', list(outlier_rows))
 
-print('Multivariate Normality Test:')
-stat, p, normal = multivariate_normality(train.select_dtypes(exclude='object').to_numpy())
-print('Statistics=%.3f, p=%.3f' % (stat, p))
-print('Does data set have normal distribution:', normal)
+#remove outliers from the combined and train datasets
+combined_trf=combined.copy().drop(outlier_rows).reset_index(drop=True)
+train_trf=train2.copy().drop(outlier_rows).reset_index(drop=True)
+
+#check the results
+print('Combined imputed & encoded train+test features before/after outlier removal:',
+      combined.shape, combined_trf.shape)
+print('Imputed & label encoded training data before/after outlier removal:',
+      train2.shape, train_trf.shape)
 
 
-#%% TOMORROW
-# 3) Feature engineering
-# Go through both notebooks and pick up useful ideas
-# Try to run column clustering on the data set?
+#%% SCALE AND ADDRESS SKEWNESS IN COMBINED FEATURES - MANDATORY
 
-# 2) Go through categorical values with low number of observations
+#https://medium.com/@sjacks/feature-transformation-21282d1a3215
+#https://www.kaggle.com/jiriludvik/how-i-made-top-0-3-on-a-kaggle-competition/edit?rvi=1
+#https://www.datasklr.com/ols-least-squares-regression/transforming-variables
+
+#Function to create log scale box plot for all variables in a df
+def boxplot_logscale(df):
+    sns.set_style("white")
+    f, ax = plt.subplots(figsize=(8, 7))
+    ax.set_xscale("log")
+    ax = sns.boxplot(data=df , orient="h", palette="Set1")
+    ax.xaxis.grid(False)
+    ax.set(ylabel="Feature names")
+    ax.set(xlabel="Numeric values")
+    ax.set(title="Numeric Distribution of Features")
+    sns.despine(trim=True, left=True)
+    plt.show()
+
+#Function to identify all variables in a df with skewness> threshold
+def get_skewed_index(df, thresh=.5):
+    skew_features = df.apply(lambda x: skew(x)).sort_values(ascending=False)
+    high_skew = skew_features[skew_features > thresh]
+    skew_index = high_skew.index
+    print("There are {} numerical features with Skew > threshold:".format(high_skew.shape[0]))
+    return(skew_index)
+
+# Create an index of numerical columns w/o binary columns
+num_cols=list(set(combined_trf.select_dtypes(exclude='object').columns)-set(binary_numcols))
+
+#Describe features before transformations
+combined_trf[num_cols].describe().transpose()[['min','max','mean','std']]
+boxplot_logscale(combined_trf[num_cols])
+# biggest max is five orders of magnitude bigger than the smallest max - needs scaling
+
+#Scale & center data
+scaler=RobustScaler()
+combined_trf[num_cols]=scaler.fit_transform(combined_trf[num_cols])
+combined_trf[num_cols].describe().transpose()[['min','max','mean','std']]
+boxplot_logscale(combined_trf[num_cols])
+
+# RELOAD DATA AND DEBUG
+# Fix skewed features
+skewed_cols=get_skewed_index(combined_trf[num_cols])
+print(skewed_cols)
+transformer=PowerTransformer(method='yeo-johnson')
+combined_trf[skewed_cols]=transformer.fit_transform(combined_trf[skewed_cols])
+skewed_cols=get_skewed_index(combined_trf[num_cols])
+print(skewed_cols)
+combined_trf[skewed_cols].hist(), plt.show()
+# 'PoolQC', 'PoolArea', '3SsnPorch', 'LowQualFinSF', 'MiscVal',
+#       'BsmtHalfBath', 'ScreenPorch', 'BsmtFinSF2', 'EnclosedPorch',
+#       'BsmtExposure', 'MasVnrArea', 'HalfBath'
+
+#drop remaining skewed variables
+combined_trf=combined_trf.drop(skewed_cols, axis=1)
+
+#recalculate numerical columns
+num_cols=list(set(combined_trf.select_dtypes(exclude='object').columns)-set(binary_numcols))
+
+#report on columns with skewed features
+get_skewed_index(combined_trf[num_cols])
+
+#report on numerical columns
+boxplot_logscale(combined_trf[num_cols])
+
+# Relatively large number of cardinal variables encoded to ordinal scale are skewed.
+# In the next version of the script, it may be better to keep them as cardinals and simply generate dummy vars
+
+# Transform response to log scale - this will need to be taken into consideration when generating predictions
+mydistplot('SalePrice',train_trf)
+train_trf["SalePrice"] = np.log1p(train_trf["SalePrice"])
+mydistplot('SalePrice',train_trf)
+
+#%% Generate dummy vars for categorical variables - MANDATORY
+
+# Generate dummy variables
+combined_trf2=pd.get_dummies(combined_trf).reset_index(drop=True)
+print('Combined data set before/after creation of dummy variables:', combined_trf.shape, combined_trf2.shape)
+
+#%% RECREATE TRAINING AND TEST DATA SETS AFTER TRANSFORMATION - MANDATORY
+
+# Transformed training dataset
+train3_x = combined_trf2.iloc[:len(train_trf), :]
+train3_y=train_trf['SalePrice']
+print('Training features before / after transformation.:', train2_x.shape,'/', train3_x.shape)
+print('Training response before / after transformation:', train2_y.shape,'/', train3_y.shape)
+
+train3=pd.concat([train3_y, train3_x.reindex(train3_y.index)], axis=1)
+print('Training data shape before / after imputation & feat. eng.:', train2.shape,'/', train3.shape)
+
+# test data set with imputed values and encoded labels
+test3 = combined_trf2.iloc[len(train_trf):, :]
+print('Test data shape before / after transformation:', test2.shape,'/', test3.shape)
+
+#%% MODELLING
+
+def get_cv_score(estimator, X, y, cv, scoring):
+    time_start = perf_counter()
+    print('Baseline Score ({})'.format(scoring))
+    print('Model:', estimator.__class__.__name__)
+    cv_result = cross_validate(estimator=estimator, X=X, y=y, cv=cv, scoring=scoring, n_jobs=-1)
+    cv_mean=-cv_result['test_score'].mean()
+    cv_std=cv_result['test_score'].std() * 2
+    print('Test Score Mean:', round(cv_mean,4))
+    print('Test Score Stdx2:', round(cv_std*2,4))
+    time_stop = perf_counter()
+    print('Elapsed time:', timedelta(seconds=round(time_stop - time_start, 0)))
+    return(cv_mean)
+
+def get_gridsearch(estimator,param_grid,X, y,scoring,cv):
+    time_start = perf_counter()
+    grid_search=GridSearchCV(estimator=estimator, param_grid=param_grid, scoring=scoring, cv=cv,n_jobs=-1)
+    grid_search.fit(X,y)
+    print('Tuned Model Score ({})'.format(scoring))
+    print('Best Score:',round(-grid_search.best_score_,4))
+    print('Best Parameters:',grid_search.best_params_)
+    time_stop = perf_counter()
+    print('Elapsed Time:', timedelta(seconds=round(time_stop - time_start, 0)))
+    return(grid_search)
+
+scoring_method='neg_root_mean_squared_error'
+cv_method=KFold(n_splits=13, random_state=0, shuffle=True)
 
 
-# 4)  Outlier identification: method tbc
-#https://machinelearningmastery.com/model-based-outlier-detection-and-removal-in-python/
+#Lasso
+par={'alpha': [0.000506],
+     'max_iter':[10000]}
+model=Lasso(random_state=0)
+cv_score =get_cv_score(estimator=model, X=train3_x, y=train3_y, cv=cv_method, scoring=scoring_method)
+grid_search=get_gridsearch(estimator=model,param_grid=par,X=train3_x,y=train3_y, scoring=scoring_method,cv=cv_method)
+
+#model_lasso=grid_search.best_estimator_
+#model_lasso.fit(train3_x,train3_y)
+#importance=model_lasso.coef_
+
+#%% XGBoost
+
+
+par_xgb = { #baseline score 0.1282
+    'learning_rate':[0.1168], # from np.linspace(0.01,0.3,20), score0.1174
+#    'max_depth' : range(1,10), # from range(1,10) maxdepth=6 score 0.1178
+    'colsample_bytree':[0.775], #fromnp.linspace(0.1,1,9) score 0.1173
+   'min_child_weight':[6], #from range (1,10) score 0.1139
+#   'subsample':np.linspace(0.1,1,9), same results as previous
+    'n_estimators': range(1000,10000,500)
+}
+
+model2=XGBRegressor(n_jobs=-1, random_state=0)
+cv_score2 =get_cv_score(estimator=model2, X=np.array(train3_x), y=np.array(train3_y), cv=cv_method, scoring=scoring_method)
+#Test Score Mean: 0.1282
+grid_search2=get_gridsearch(estimator=model2,param_grid=par_xgb,X=np.array(train3_x),y=np.array(train3_y), scoring=scoring_method,cv=cv_method)
+
+#importance=pd.DataFrame(model.coef_,index=train3_x.columns).transpose()
+#plt.bar([x for x in range(len(importance))], importance)
+#plt.show()
+
+#%% Remove highly correlated features? - LEAVE OUT FOR LATER / DELETE
+
+# Not required when using colinearity-tolerant methods:
+# Ridge, Lasso, GradientBoosting, Random Forest, SVM with RBGF Kernel
+
+c_y=train2.corr().abs()['SalePrice'].drop('SalePrice').sort_values(ascending=False)
+c_x = train2_x.corr().abs()
+c_x = (c_x.where(np.triu(np.ones(c_x.shape), k=1).astype(np.bool))
+                 .stack()
+                 .sort_values(ascending=False))
+c_x[c_x>=0.7]
+
+cols_to_drop=['YearBuilt', 'GarageCond','GarageYrBlt', 'PoolArea', 'GarageArea','GrLivArea', 'Fireplaces', 'TotalBsmtSF', '1stFlrSF', 'ExterQual', 'BsmtFinSF2']
+train2=train2.drop[cols_to_drop]
+train2_x=train2_x.drop[cols_to_drop]
+
