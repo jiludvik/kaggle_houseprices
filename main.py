@@ -24,6 +24,7 @@ from lightgbm import LGBMRegressor
 from sklearn.svm import SVR
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from mlxtend.regressor import StackingCVRegressor
+from sklearn.metrics import mean_squared_error
 
 # Display all columns
 pd.set_option('display.max_columns', None)
@@ -728,7 +729,6 @@ print('Test features before / after transformation:', test2.shape,'/', test3.sha
 #%% MODELLING: DEFINE MODELS
 #To save time, largely reused https://www.kaggle.com/lavanyashukla01/how-i-made-top-0-3-on-a-kaggle-competition
 
-
 # Define cross validation and scoring methods
 scoring_method='neg_root_mean_squared_error'
 cv_method=KFold(n_splits=13, random_state=0, shuffle=True)
@@ -913,8 +913,6 @@ elapsed_time(t_start,t_stop)
 
 #%%
 
-from sklearn.metrics import mean_squared_error
-
 # Blend models in order to make the final predictions more robust to overfitting
 def blended_predictions(X):
     return ((0.1 * ridge_model_full_data.predict(X)) + \
@@ -935,18 +933,15 @@ print('blended:', blended_score)
 
 
 #%%  Plot the predictions for each model
-#fig = plt.figure(figsize=(24, 12))
+
 ax = sns.pointplot(x=list(scores.keys()), y=[score for score, _ in scores.values()], markers=['o'], linestyles=['-'])
 for i, score in enumerate(scores.values()):
     ax.text(i, score[0] + 0.002, '{:.6f}'.format(score[0]), horizontalalignment='left', size='large', color='black', weight='semibold')
 
-plt.ylabel('Score (RMSE)', size=20, labelpad=12.5)
-plt.xlabel('Model', size=20, labelpad=12.5)
+plt.ylabel('Score (RMSE)', labelpad=12.5)
+plt.xlabel('Model', labelpad=12.5)
 plt.tick_params(axis='x', labelsize=13.5)
 plt.tick_params(axis='y', labelsize=12.5)
-
-plt.title('Scores of Models', size=20)
-
 plt.show()
 
 #%% Prepare submission
