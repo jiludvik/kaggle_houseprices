@@ -24,7 +24,7 @@ from lightgbm import LGBMRegressor
 from sklearn.svm import SVR
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from mlxtend.regressor import StackingCVRegressor
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_log_error
 
 # Display all columns
 pd.set_option('display.max_columns', None)
@@ -580,9 +580,6 @@ mylmplot(y='SalePrice', x='2ndFlrSF', data=train, title="SalePrice by 2ndFlrSF")
 myboxplot (x='GarageCars',y='SalePrice', data=train, title='SalePrice by GarageCars', h_line=train['SalePrice'].mean())
 mylmplot(x='GarageArea', y='SalePrice', data=train, title="SalePrice by GarageArea")
 
-# SalePrice goes down after 4th car - most people have max 4 cars?
-# or no-one is recording car space beyond 5 cars
-# Question: Zero values in 2nd FlrSF, BsmtFinSF1, GarageArea are skewing distribution
 
 #%% REMOVE OUTLIERS - MANDATORY
 # create new transformed combined and training data sets (with outliers removed)
@@ -649,6 +646,7 @@ print(skewed_cols)
 transformer=PowerTransformer(method='yeo-johnson')
 combined_trf[skewed_cols]=transformer.fit_transform(combined_trf[skewed_cols])
 skewed_cols=get_skewed_index(combined_trf[num_cols])
+
 print(skewed_cols)
 combined_trf[skewed_cols].hist(), plt.show()
 # 'PoolQC', 'PoolArea', '3SsnPorch', 'LowQualFinSF', 'MiscVal',
@@ -675,46 +673,32 @@ mydistplot('SalePrice',train_trf)
 train_trf["SalePrice"] = np.log1p(train_trf["SalePrice"])
 mydistplot('SalePrice',train_trf)
 
-#%% GENERATE DUMMY VARIABLES FROM REMAINING FACTORS - MANDATORY
+#%% GENERATE DUMMY VARIABLES FROM THE REMAINING FACTORS - MANDATORY
 
 # Generate dummy variables
 combined_trf2=pd.get_dummies(combined_trf).reset_index(drop=True)
 
-# Address duplicate column names
+# Remove columns with low variance
+from sklearn.feature_selection import VarianceThreshold
+selector=VarianceThreshold(0.01)
+selector.fit_transform(combined_trf2)
+cols=combined_trf2.columns[~selector.get_support()]
+print('Removing {} low variance variables:'.format(len(cols)))
+print(cols)
+combined_trf2=combined_trf2.loc[:,selector.get_support()]
+
 # check duplicate column names
 cols=pd.Series(combined_trf2.columns)
 dup_names=cols[cols.duplicated()].unique()
 print('Duplicate column names:', dup_names)
 
-#creat a list with transformed col names (duplicate names have a sequence number appended)
-for dup in dup_names:
-    cols[cols[cols == dup].index.values.tolist()] = [dup + '.' + str(i) if i != 0 else dup for i in range(sum(cols == dup))]
-#rename duplicate column names with the new list of unique column names
-combined_trf2.columns=cols
+print('Combined data set before/after creation of dummy variables:', combined_trf.shape, combined_trf2.shape)
 
-# replace duplicate columns by a new column created by row-wise addition of values from orig columns
-for dup in dup_names:
-    print('Treating column', dup)
-    dup_mask=cols.str.startswith(dup)
-    dup_pair=combined_trf2.columns[dup_mask]
-    print('Sum\n', combined_trf2[dup_pair].sum())
-    rowsum=combined_trf2[dup_pair].sum(axis=1)
-    if (rowsum>1).sum()==0:
-        combined_trf3=combined_trf2.drop(dup_pair,axis=1)
-        combined_trf3[dup]=rowsum
-    else:
-        print ('Data issues in columns {}, proceed with manual de-duplication'.format(dup))
-
-print('Remaining duplicate column names:',combined_trf3.columns[combined_trf3.columns.duplicated()])
-combined_trf3.shape
-combined_trf2.shape
-
-print('Combined data set before/after creation of dummy variables:', combined_trf.shape, combined_trf3.shape)
 
 #%% RECREATE TRAINING AND TEST DATA SETS AFTER TRANSFORMATION - MANDATORY
 
 # Transformed training dataset
-train3_x = combined_trf3.iloc[:len(train_trf), :]
+train3_x = combined_trf2.iloc[:len(train_trf), :]
 train3_y=train_trf['SalePrice']
 print('Training features before / after transformation:', train2_x.shape,'/', train3_x.shape)
 print('Training response before / after transformation:', train2_y.shape,'/', train3_y.shape)
@@ -723,14 +707,14 @@ train3=pd.concat([train3_y, train3_x.reindex(train3_y.index)], axis=1)
 print('Training features+response before / after imputation & feat. eng.:', train2.shape,'/', train3.shape)
 
 # test data set with imputed values and encoded labels
-test3 = combined_trf3.iloc[len(train_trf):, :]
+test3 = combined_trf2.iloc[len(train_trf):, :]
 print('Test features before / after transformation:', test2.shape,'/', test3.shape)
 
 #%% MODELLING: DEFINE MODELS
 #To save time, largely reused https://www.kaggle.com/lavanyashukla01/how-i-made-top-0-3-on-a-kaggle-competition
 
 # Define cross validation and scoring methods
-scoring_method='neg_root_mean_squared_error'
+scoring_method='neg_mean_squared_log_error'
 cv_method=KFold(n_splits=13, random_state=0, shuffle=True)
 
 # Define function that returns positive RMSE
@@ -809,7 +793,7 @@ def elapsed_time(time_start, time_stop):
 
 scores = {}
 
-print('Baseline Cross-Validation Scores (RMSE)')
+print('Baseline Cross-Validation Scores (RMSLE)')
 
 print('lasso')
 t_start = perf_counter()
@@ -860,8 +844,7 @@ print("gbr: {:.4f} ({:.4f})".format(score.mean(), score.std()))
 scores['gbr'] = (score.mean(), score.std())
 elapsed_time(t_start,t_stop)
 
-#%%
-#%TRAIN MODELS
+#%% TRAIN MODELS
 print('Training Models\n')
 print('stack_gen')
 t_start = perf_counter()
@@ -923,13 +906,13 @@ def blended_predictions(X):
             (0.05 * rf_model_full_data.predict(X)) + \
             (0.35 * stack_gen_model.predict(np.array(X))))
 
-stacked_score=mean_squared_error(y_true=train3_y, y_pred=stack_gen_model.predict(np.array(train3_x)), squared=False)
-print('stacked:', stacked_score)
-scores['stacked'] = (stacked_score, 0)
+stacked_score=mean_squared_log_error(y_true=train3_y, y_pred=stack_gen_model.predict(np.array(train3_x)))
+print('stack:', stacked_score)
+scores['stack'] = (stacked_score, 0)
 
-blended_score = mean_squared_error(y_true=train3_y, y_pred=blended_predictions(train3_x), squared=False)
-scores['blended'] = (blended_score, 0)
-print('blended:', blended_score)
+blended_score = mean_squared_log_error(y_true=train3_y, y_pred=blended_predictions(train3_x))
+scores['blend'] = (blended_score, 0)
+print('blend:', blended_score)
 
 
 #%%  Plot the predictions for each model
@@ -966,7 +949,7 @@ submission['SalePrice'] = submission['SalePrice'].apply(lambda x: x if x < q2 el
 submission['SalePrice'] *= 1.001619
 submission.shape
 #submission.to_csv("output/submission_regression_stack.csv", index=False)
-submission.to_csv("output/submission_regression_blend.csv", index=False)
+submission.to_csv("output/submission_regression_blend3.csv", index=False)
 #submission.to_csv("output/submission_regression_svr.csv", index=False)
 
-#Blended model:  758 on leaderboard - RMSLE 0.12239
+#Blended model:  Kaggle Score: 0.12143 Leaderboard position 591
