@@ -2,33 +2,28 @@
 
 #%% LOAD LIBRARIES - MANDATORY
 
-#Essentials
+#Data Wrangling
 import numpy as np
 import pandas as pd
+from scipy.stats import skew
+from sklearn.preprocessing import PowerTransformer, RobustScaler
 from datetime import timedelta
 from time import perf_counter
 
-#Plotting
+#Exploratory Data Analysis
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.feature_selection import RFE
 
-#Statistics
-from scipy.stats import skew
-
-#Preprocessing
-from sklearn.preprocessing import PowerTransformer, RobustScaler
-from sklearn.feature_selection import RFECV, RFE
-from sklearn.metrics import mean_squared_error
-from sklearn.pipeline import make_pipeline
-
-#Model Selection
-from sklearn.model_selection import RepeatedStratifiedKFold, KFold, cross_validate
-from sklearn.model_selection import GridSearchCV
-
-#Models
+#Modelling
+from sklearn.model_selection import KFold, cross_val_score
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.linear_model import Lasso
+from sklearn.linear_model import Lasso, RidgeCV
 from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from sklearn.svm import SVR
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from mlxtend.regressor import StackingCVRegressor
 
 # Display all columns
 pd.set_option('display.max_columns', None)
@@ -504,22 +499,6 @@ print(best_features_rfe)
 #LotArea', 'OverallQual', 'YearRemodAdd', 'BsmtFinSF1', 'TotalBsmtSF',
 #       '2ndFlrSF', 'GrLivArea', 'GarageArea', 'Age', 'TotalSqFeet'
 
-#%% EDA: IDENTIFY OPTIMUM FEATURES USING RFECV - OPTIONAL - CAN BE LEFT FOR LATER
-
-# https://machinelearningmastery.com/rfe-feature-selection-in-python/
-time_start = perf_counter()
-scoring_method='neg_mean_squared_error'
-cv_method = RepeatedStratifiedKFold(n_splits=10, n_repeats=10, random_state=0)
-model = DecisionTreeRegressor()
-selector_rfecv = RFECV(estimator=model, scoring=scoring_method, n_jobs=-1, cv=cv_method)
-selector_rfecv.fit(train2num_x,train2_y)
-time_stop = perf_counter()
-best_features_rfecv=train2num_x.columns[selector_rfecv.support_]
-print('Best Features By RFECV with DecisionTreeClassifier')
-print (len(best_features_rfecv),'out of', len(train2_x.columns),'columns')
-print (best_features_rfecv)
-print ('Elapsed time RFECV:', timedelta(seconds=round(time_stop-time_start,0)))
-
 #%% EDA: RELATIONSHIP BETWEEN TOP VARIABLES - OPTIONAL
 
 #Topics / Functions for EDA
@@ -604,7 +583,7 @@ mylmplot(x='GarageArea', y='SalePrice', data=train, title="SalePrice by GarageAr
 # or no-one is recording car space beyond 5 cars
 # Question: Zero values in 2nd FlrSF, BsmtFinSF1, GarageArea are skewing distribution
 
-#%% REMOVE OUTLIERS IN COMBINED & TRAINING DATA - MANDATORY
+#%% REMOVE OUTLIERS - MANDATORY
 # create new transformed combined and training data sets (with outliers removed)
 
 outlier_rows=train2[(train2['OverallQual']<5) & (train2['SalePrice']>200000)].index.\
@@ -622,7 +601,7 @@ print('Imputed & label encoded training data before/after outlier removal:',
       train2.shape, train_trf.shape)
 
 
-#%% SCALE AND ADDRESS SKEWNESS IN COMBINED FEATURES - MANDATORY
+#%% SCALE AND ADDRESS SKEWNESS IN PREDICTORS+ RESPONSE- MANDATORY
 
 #https://medium.com/@sjacks/feature-transformation-21282d1a3215
 #https://www.kaggle.com/jiriludvik/how-i-made-top-0-3-on-a-kaggle-competition/edit?rvi=1
@@ -663,7 +642,6 @@ combined_trf[num_cols]=scaler.fit_transform(combined_trf[num_cols])
 combined_trf[num_cols].describe().transpose()[['min','max','mean','std']]
 boxplot_logscale(combined_trf[num_cols])
 
-# RELOAD DATA AND DEBUG
 # Fix skewed features
 skewed_cols=get_skewed_index(combined_trf[num_cols])
 print(skewed_cols)
@@ -696,102 +674,304 @@ mydistplot('SalePrice',train_trf)
 train_trf["SalePrice"] = np.log1p(train_trf["SalePrice"])
 mydistplot('SalePrice',train_trf)
 
-#%% Generate dummy vars for categorical variables - MANDATORY
+#%% GENERATE DUMMY VARIABLES FROM REMAINING FACTORS - MANDATORY
 
 # Generate dummy variables
 combined_trf2=pd.get_dummies(combined_trf).reset_index(drop=True)
-print('Combined data set before/after creation of dummy variables:', combined_trf.shape, combined_trf2.shape)
+
+# Address duplicate column names
+# check duplicate column names
+cols=pd.Series(combined_trf2.columns)
+dup_names=cols[cols.duplicated()].unique()
+print('Duplicate column names:', dup_names)
+
+#creat a list with transformed col names (duplicate names have a sequence number appended)
+for dup in dup_names:
+    cols[cols[cols == dup].index.values.tolist()] = [dup + '.' + str(i) if i != 0 else dup for i in range(sum(cols == dup))]
+#rename duplicate column names with the new list of unique column names
+combined_trf2.columns=cols
+
+# replace duplicate columns by a new column created by row-wise addition of values from orig columns
+for dup in dup_names:
+    print('Treating column', dup)
+    dup_mask=cols.str.startswith(dup)
+    dup_pair=combined_trf2.columns[dup_mask]
+    print('Sum\n', combined_trf2[dup_pair].sum())
+    rowsum=combined_trf2[dup_pair].sum(axis=1)
+    if (rowsum>1).sum()==0:
+        combined_trf3=combined_trf2.drop(dup_pair,axis=1)
+        combined_trf3[dup]=rowsum
+    else:
+        print ('Data issues in columns {}, proceed with manual de-duplication'.format(dup))
+
+print('Remaining duplicate column names:',combined_trf3.columns[combined_trf3.columns.duplicated()])
+combined_trf3.shape
+combined_trf2.shape
+
+print('Combined data set before/after creation of dummy variables:', combined_trf.shape, combined_trf3.shape)
 
 #%% RECREATE TRAINING AND TEST DATA SETS AFTER TRANSFORMATION - MANDATORY
 
 # Transformed training dataset
-train3_x = combined_trf2.iloc[:len(train_trf), :]
+train3_x = combined_trf3.iloc[:len(train_trf), :]
 train3_y=train_trf['SalePrice']
-print('Training features before / after transformation.:', train2_x.shape,'/', train3_x.shape)
+print('Training features before / after transformation:', train2_x.shape,'/', train3_x.shape)
 print('Training response before / after transformation:', train2_y.shape,'/', train3_y.shape)
 
 train3=pd.concat([train3_y, train3_x.reindex(train3_y.index)], axis=1)
-print('Training data shape before / after imputation & feat. eng.:', train2.shape,'/', train3.shape)
+print('Training features+response before / after imputation & feat. eng.:', train2.shape,'/', train3.shape)
 
 # test data set with imputed values and encoded labels
-test3 = combined_trf2.iloc[len(train_trf):, :]
-print('Test data shape before / after transformation:', test2.shape,'/', test3.shape)
+test3 = combined_trf3.iloc[len(train_trf):, :]
+print('Test features before / after transformation:', test2.shape,'/', test3.shape)
 
-#%% MODELLING
+#%% MODELLING: DEFINE MODELS
+#To save time, largely reused https://www.kaggle.com/lavanyashukla01/how-i-made-top-0-3-on-a-kaggle-competition
 
-def get_cv_score(estimator, X, y, cv, scoring):
-    time_start = perf_counter()
-    print('Baseline Score ({})'.format(scoring))
-    print('Model:', estimator.__class__.__name__)
-    cv_result = cross_validate(estimator=estimator, X=X, y=y, cv=cv, scoring=scoring, n_jobs=-1)
-    cv_mean=-cv_result['test_score'].mean()
-    cv_std=cv_result['test_score'].std() * 2
-    print('Test Score Mean:', round(cv_mean,4))
-    print('Test Score Stdx2:', round(cv_std*2,4))
-    time_stop = perf_counter()
-    print('Elapsed time:', timedelta(seconds=round(time_stop - time_start, 0)))
-    return(cv_mean)
 
-def get_gridsearch(estimator,param_grid,X, y,scoring,cv):
-    time_start = perf_counter()
-    grid_search=GridSearchCV(estimator=estimator, param_grid=param_grid, scoring=scoring, cv=cv,n_jobs=-1)
-    grid_search.fit(X,y)
-    print('Tuned Model Score ({})'.format(scoring))
-    print('Best Score:',round(-grid_search.best_score_,4))
-    print('Best Parameters:',grid_search.best_params_)
-    time_stop = perf_counter()
-    print('Elapsed Time:', timedelta(seconds=round(time_stop - time_start, 0)))
-    return(grid_search)
-
+# Define cross validation and scoring methods
 scoring_method='neg_root_mean_squared_error'
 cv_method=KFold(n_splits=13, random_state=0, shuffle=True)
 
+# Define function that returns positive RMSE
+def get_cv_score(model, X=train3_x, y=train3_y):
+    rmse = -cross_val_score(model, X, y, scoring=scoring_method, cv=cv_method)
+    return (rmse)
 
-#Lasso
-par={'alpha': [0.000506],
-     'max_iter':[10000]}
-model=Lasso(random_state=0)
-cv_score =get_cv_score(estimator=model, X=train3_x, y=train3_y, cv=cv_method, scoring=scoring_method)
-grid_search=get_gridsearch(estimator=model,param_grid=par,X=train3_x,y=train3_y, scoring=scoring_method,cv=cv_method)
+lasso= Lasso(alpha=0.000506,
+             max_iter=10000,
+             random_state=0)
 
-#model_lasso=grid_search.best_estimator_
-#model_lasso.fit(train3_x,train3_y)
-#importance=model_lasso.coef_
+lightgbm = LGBMRegressor(objective='regression',
+                       num_leaves=6,
+                       learning_rate=0.01,
+                       n_estimators=7000,
+                       max_bin=200,
+                       bagging_fraction=0.8,
+                       bagging_freq=4,
+                       bagging_seed=8,
+                       feature_fraction=0.2,
+                       feature_fraction_seed=8,
+                       min_sum_hessian_in_leaf = 11,
+                         n_jobs=-1,
+                       verbose=-1,
+                       random_state=0)
 
-#%% XGBoost
+xgboost = XGBRegressor(learning_rate=0.01,
+                       n_estimators=6000,
+                       max_depth=4,
+                       min_child_weight=0,
+                       gamma=0.6,
+                       subsample=0.7,
+                       colsample_bytree=0.7,
+                       nthread=-1,
+                       n_jobs=-1,
+                       scale_pos_weight=1,
+                       seed=27,
+                       reg_alpha=0.00006,
+                       random_state=0)
+
+# Ridge Regressor
+ridge_alphas = [1e-15, 1e-10, 1e-8, 9e-4, 7e-4, 5e-4, 3e-4, 1e-4, 1e-3, 5e-2, 1e-2, 0.1, 0.3, 1, 3, 5, 10, 15, 18, 20, 30, 50, 75, 100]
+ridge = RidgeCV(alphas=ridge_alphas, cv=cv_method)
+
+# Support Vector Regressor
+svr = SVR(C= 20, epsilon= 0.008, gamma=0.0003)
+
+# Gradient Boosting Regressor
+gbr = GradientBoostingRegressor(n_estimators=6000,
+                                learning_rate=0.01,
+                                max_depth=4,
+                                max_features='sqrt',
+                                min_samples_leaf=15,
+                                min_samples_split=10,
+                                loss='huber',
+                                random_state=0)
+
+rf = RandomForestRegressor(n_estimators=1200,
+                          max_depth=15,
+                          min_samples_split=5,
+                          min_samples_leaf=5,
+                          max_features=None,
+                          oob_score=True,
+                          random_state=0,
+                          n_jobs=-1)
+
+# Stack up all the models above, optimized using xgboost
+stack_gen = StackingCVRegressor(regressors=(lasso, xgboost, lightgbm, svr, ridge, gbr, rf),
+                                meta_regressor=xgboost,
+                                use_features_in_secondary=True)
+
+def elapsed_time(time_start, time_stop):
+    print ('Elapsed time:', timedelta(seconds=round(time_stop-time_start,0)))
+
+#%% MODELLING : GET BASELINE CROSS-VALIDATION SCORES - MANDATORY
+
+scores = {}
+
+print('Baseline Cross-Validation Scores (RMSE)')
+
+print('lasso')
+t_start = perf_counter()
+score = get_cv_score(lasso)
+t_stop = perf_counter()
+print("lasso: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['las'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+
+print('\nlightgbm')
+t_start = perf_counter()
+score = get_cv_score(lightgbm)
+t_stop = perf_counter()
+print("lightgbm: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['lgb'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+
+print('\nxgboost')
+t_start = perf_counter()
+score = get_cv_score(xgboost)
+t_stop = perf_counter()
+print("xgboost: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['xgb'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+#
+print('\nsvr')
+t_start = perf_counter()
+score = get_cv_score(svr)
+t_stop = perf_counter()
+print("SVR: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['svr'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+
+#
+print('\nridge')
+t_start = perf_counter()
+score = get_cv_score(ridge)
+t_stop = perf_counter()
+print("ridge: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['ridge'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+
+print('\ngradient boosting')
+t_start = perf_counter()
+score = get_cv_score(gbr)
+t_stop = perf_counter()
+print("gbr: {:.4f} ({:.4f})".format(score.mean(), score.std()))
+scores['gbr'] = (score.mean(), score.std())
+elapsed_time(t_start,t_stop)
+
+#%%
+#%TRAIN MODELS
+print('Training Models\n')
+print('stack_gen')
+t_start = perf_counter()
+stack_gen_model = stack_gen.fit(np.array(train3_x), np.array(train3_y))
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('lasso')
+t_start = perf_counter()
+las_model_full_data = lasso.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('lightgbm')
+t_start = perf_counter()
+lgb_model_full_data = lightgbm.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('xgboost')
+t_start = perf_counter()
+xgb_model_full_data = xgboost.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('svr')
+t_start = perf_counter()
+svr_model_full_data = svr.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('ridge')
+t_start = perf_counter()
+ridge_model_full_data = ridge.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('randomforest')
+t_start = perf_counter()
+rf_model_full_data = rf.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+print('GradientBoosting')
+t_start = perf_counter()
+gbr_model_full_data = gbr.fit(train3_x, train3_y)
+t_stop = perf_counter()
+elapsed_time(t_start,t_stop)
+
+#%%
+
+from sklearn.metrics import mean_squared_error
+
+# Blend models in order to make the final predictions more robust to overfitting
+def blended_predictions(X):
+    return ((0.1 * ridge_model_full_data.predict(X)) + \
+            (0.2 * svr_model_full_data.predict(X)) + \
+            (0.1 * gbr_model_full_data.predict(X)) + \
+            (0.1 * xgb_model_full_data.predict(X)) + \
+            (0.1 * lgb_model_full_data.predict(X)) + \
+            (0.05 * rf_model_full_data.predict(X)) + \
+            (0.35 * stack_gen_model.predict(np.array(X))))
+
+stacked_score=mean_squared_error(y_true=train3_y, y_pred=stack_gen_model.predict(np.array(train3_x)), squared=False)
+print('stacked:', stacked_score)
+scores['stacked'] = (stacked_score, 0)
+
+blended_score = mean_squared_error(y_true=train3_y, y_pred=blended_predictions(train3_x), squared=False)
+scores['blended'] = (blended_score, 0)
+print('blended:', blended_score)
 
 
-par_xgb = { #baseline score 0.1282
-    'learning_rate':[0.1168], # from np.linspace(0.01,0.3,20), score0.1174
-#    'max_depth' : range(1,10), # from range(1,10) maxdepth=6 score 0.1178
-    'colsample_bytree':[0.775], #fromnp.linspace(0.1,1,9) score 0.1173
-   'min_child_weight':[6], #from range (1,10) score 0.1139
-#   'subsample':np.linspace(0.1,1,9), same results as previous
-    'n_estimators': range(1000,10000,500)
-}
+#%%  Plot the predictions for each model
+#fig = plt.figure(figsize=(24, 12))
+ax = sns.pointplot(x=list(scores.keys()), y=[score for score, _ in scores.values()], markers=['o'], linestyles=['-'])
+for i, score in enumerate(scores.values()):
+    ax.text(i, score[0] + 0.002, '{:.6f}'.format(score[0]), horizontalalignment='left', size='large', color='black', weight='semibold')
 
-model2=XGBRegressor(n_jobs=-1, random_state=0)
-cv_score2 =get_cv_score(estimator=model2, X=np.array(train3_x), y=np.array(train3_y), cv=cv_method, scoring=scoring_method)
-#Test Score Mean: 0.1282
-grid_search2=get_gridsearch(estimator=model2,param_grid=par_xgb,X=np.array(train3_x),y=np.array(train3_y), scoring=scoring_method,cv=cv_method)
+plt.ylabel('Score (RMSE)', size=20, labelpad=12.5)
+plt.xlabel('Model', size=20, labelpad=12.5)
+plt.tick_params(axis='x', labelsize=13.5)
+plt.tick_params(axis='y', labelsize=12.5)
 
-#importance=pd.DataFrame(model.coef_,index=train3_x.columns).transpose()
-#plt.bar([x for x in range(len(importance))], importance)
-#plt.show()
+plt.title('Scores of Models', size=20)
 
-#%% Remove highly correlated features? - LEAVE OUT FOR LATER / DELETE
+plt.show()
 
-# Not required when using colinearity-tolerant methods:
-# Ridge, Lasso, GradientBoosting, Random Forest, SVM with RBGF Kernel
+#%% Prepare submission
+# Read in sample_submission dataframe
 
-c_y=train2.corr().abs()['SalePrice'].drop('SalePrice').sort_values(ascending=False)
-c_x = train2_x.corr().abs()
-c_x = (c_x.where(np.triu(np.ones(c_x.shape), k=1).astype(np.bool))
-                 .stack()
-                 .sort_values(ascending=False))
-c_x[c_x>=0.7]
+submission = pd.read_csv("input/sample_submission.csv")
+submission.shape
 
-cols_to_drop=['YearBuilt', 'GarageCond','GarageYrBlt', 'PoolArea', 'GarageArea','GrLivArea', 'Fireplaces', 'TotalBsmtSF', '1stFlrSF', 'ExterQual', 'BsmtFinSF2']
-train2=train2.drop[cols_to_drop]
-train2_x=train2_x.drop[cols_to_drop]
+# Append predictions from blended models
+submission.iloc[:,1] = np.floor(np.expm1(blended_predictions(test3)))
+#submission.iloc[:,1] = np.floor(np.expm1(stack_gen_model.predict(np.array(test3))))
+#submission.iloc[:,1] = np.floor(np.expm1(svr_model_full_data.predict(np.array(test3))))
 
+
+# Fix outlier predictions
+q1 = submission['SalePrice'].quantile(0.0045)
+q2 = submission['SalePrice'].quantile(0.99)
+submission['SalePrice'] = submission['SalePrice'].apply(lambda x: x if x > q1 else x*0.77)
+submission['SalePrice'] = submission['SalePrice'].apply(lambda x: x if x < q2 else x*1.1)
+
+# Scale predictions
+submission['SalePrice'] *= 1.001619
+submission.shape
+#submission.to_csv("output/submission_regression_stack.csv", index=False)
+submission.to_csv("output/submission_regression_blend.csv", index=False)
+#submission.to_csv("output/submission_regression_svr.csv", index=False)
+
+#Blended model:  758 on leaderboard - RMSLE 0.12239
